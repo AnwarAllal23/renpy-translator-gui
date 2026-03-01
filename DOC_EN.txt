@@ -1,0 +1,254 @@
+
+---
+
+## `DOC_EN.txt` (detailed)
+
+```txt
+REN'PY TRANSLATOR (GUI) - FULL DOCUMENTATION (EN)
+=================================================
+
+1) Project goal
+---------------
+Ren'Py Translator is a desktop app (PySide6) that automates translation for Ren'Py games.
+
+Main pipeline:
+- Scan .rpy scripts
+- Extract translatable strings
+- Translate via LibreTranslate
+- Generate translated files into game/tl/<lang>/
+- (If packaged .rpa) apply translation back to the original game automatically
+
+Core promise: TRANSLATE WITHOUT BREAKING REN'PY.
+
+------------------------------------------------------------
+
+2) Requirements
+---------------
+- Python 3.10+ recommended
+- Pip
+- Windows / Linux / macOS
+
+Dependencies (requirements.txt):
+- PySide6
+- requests
+
+------------------------------------------------------------
+
+3) Installation
+---------------
+1) Create venv:
+   python -m venv .venv
+
+2) Activate:
+   Windows: .venv\Scripts\activate
+   macOS/Linux: source .venv/bin/activate
+
+3) Install:
+   pip install -r requirements.txt
+
+4) Run:
+   python main.py
+
+Optional:
+   python main.py "C:\path\to\game"
+
+------------------------------------------------------------
+
+4) Ren'Py text rules (VERY IMPORTANT)
+-------------------------------------
+Ren'Py dialogue strings often contain elements that MUST NOT change.
+
+A) Text tags { ... }
+   Examples:
+   "{i}Hello{/i}"
+   "{color=#fff}Text{/color}"
+   "{=style_name}"
+
+   Rule:
+   - Everything inside { ... } must remain EXACTLY the same.
+   - Especially: {=style_name} must never be translated.
+     Otherwise crash: "Style 'xxx' does not exist"
+
+B) Interpolations [ ... ]
+   Example:
+   "Hi [player_name]!"
+
+   Rule:
+   - Everything inside [ ... ] must remain EXACTLY the same.
+
+C) Percent formatting %
+   Some strings are formatted with %:
+   - %s
+   - %(name)s
+   - %%
+
+   Rules:
+   - Do not alter placeholders like %s or %(...)s
+   - A literal percent (e.g. "100%") must become "100%%"
+     Otherwise crash: "ValueError: incomplete format"
+
+------------------------------------------------------------
+
+5) Usage - NON-packaged Ren'Py project
+--------------------------------------
+A non-packaged game = you have the Ren'Py project folder with "game/" visible.
+
+Steps:
+1) Open the app
+2) Select the game root folder (the one containing game/)
+3) Choose target language (e.g. fr)
+4) Run Scan / Extract
+5) Run Translate
+6) Verify output:
+   game/tl/<lang>/...
+
+Expected structure:
+MyGame/
+  game/
+    script.rpy
+    ...
+    tl/
+      fr/
+        script.rpy
+        ...
+
+------------------------------------------------------------
+
+6) Usage - PACKAGED game (.rpa)
+-------------------------------
+Packaged games often contain .rpa archives and are not meant to be edited directly.
+
+Concept:
+- The app creates a WORKSPACE (safe working copy).
+- You translate inside the workspace.
+- Then you apply the translated tl folder back into the original game.
+
+Steps:
+1) Tools -> Prepare packaged game
+2) The app creates a workspace and stores the original game path
+3) Inside workspace:
+   - Scan / Extract
+   - Translate
+4) Click "Apply to original game"
+   - Copies workspace/game/tl/<lang>/ -> original/game/tl/<lang>/
+   - Creates target language folder automatically if missing
+
+------------------------------------------------------------
+
+7) LibreTranslate endpoint
+--------------------------
+The app uses LibreTranslate over HTTP.
+
+Two options:
+- Public endpoint (often slow/limited)
+- LOCAL endpoint (recommended)
+
+Local is better because:
+- faster
+- stable
+- no rate limits
+- best for large games
+
+------------------------------------------------------------
+
+8) Docker setup (LibreTranslate local)
+--------------------------------------
+Prerequisites:
+- Docker installed (Docker Desktop on Windows/macOS)
+
+Simple setup:
+
+1) Run LibreTranslate:
+   docker run -d --name libretranslate -p 5000:5000 libretranslate/libretranslate
+
+2) Verify:
+   docker ps
+
+3) Test in browser:
+   http://localhost:5000
+
+4) In the app settings, try one of:
+   - http://localhost:5000/translate
+   - http://localhost:5000
+   (depends on your app/endpoint configuration)
+
+Stop/Start:
+- docker stop libretranslate
+- docker start libretranslate
+
+Remove:
+- docker rm -f libretranslate
+
+If it doesn't work:
+- try both endpoints above
+- ensure port 5000 is not used by another program
+
+------------------------------------------------------------
+
+9) Troubleshooting (common crashes)
+-----------------------------------
+
+A) "Style 'xxx' does not exist"
+Cause:
+- A {=style} tag was translated.
+Example:
+  {=maybe} -> {=peut}
+
+Fix:
+- {=...} must be protected and remain unchanged.
+- Re-translate from a clean base.
+
+B) "ValueError: incomplete format"
+Cause:
+- A literal % remained a single percent.
+Example:
+  "100%" should be "100%%"
+
+Fix:
+- Protect %s / %(...)s tokens
+- Convert literal % to %%
+- Re-translate from a clean base.
+
+C) Tags moved / wrong order
+Cause:
+- Temporary placeholders were translated/reordered by the translation API
+
+Fix:
+- Tokenize and translate only normal text between tokens.
+- Re-translate from a clean base.
+
+D) "It works once then breaks again"
+Cause:
+- You translated over already-broken translated files
+
+Fix:
+- Delete game/tl/<lang>/ and re-translate
+- Or regenerate the packaged workspace and re-translate
+
+------------------------------------------------------------
+
+10) Project structure (summary)
+-------------------------------
+- main.py : entrypoint
+- main_window.py : main UI
+- settings.py : settings (language, endpoint)
+- translator.py : translation + Ren'Py safety rules
+- rpy_parser.py : .rpy parsing
+- rpy_rewriter.py : rewrite into tl/
+- tl_writer.py : writes game/tl/<lang>/
+- extractor.py / rpa_extractor.py / packaged_tools.py : packaged workflow + workspace
+
+------------------------------------------------------------
+
+11) Best practices
+------------------
+- Always test on a small scene first
+- Use local LibreTranslate via Docker
+- Keep originals intact (workspace recommended)
+- Never change:
+  - { ... }
+  - [ ... ]
+  - %s, %(...)s
+- Make backups before applying to the original game
+
+END
