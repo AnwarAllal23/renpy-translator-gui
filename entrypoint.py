@@ -10,11 +10,14 @@ from pathlib import Path
 from PySide6.QtWidgets import QApplication
 
 from app.main_window import MainWindow
-
+from PySide6.QtWidgets import QApplication
+from app.theme import qss_dark
 
 def main() -> int:
     """Create the Qt application, show the main window, and start the event loop."""
     app = QApplication(sys.argv)
+
+    app.setStyleSheet(qss_dark())
 
     game_dir = None
     if len(sys.argv) > 1:

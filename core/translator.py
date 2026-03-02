@@ -1,11 +1,3 @@
-"""Ren'Py Translator - Translation backend abstraction.
-
-The Translator class isolates translation logic from the UI:
-- It supports local or remote endpoints
-- It batches requests where possible
-- It returns structured results and raises TranslationError on failures
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,7 +8,6 @@ import requests
 
 @dataclass
 class TranslatorConfig:
-    """Configuration for the translation backend."""
     endpoint: str
     source_lang: str
     target_lang: str
@@ -24,166 +15,113 @@ class TranslatorConfig:
 
 
 class TranslationError(RuntimeError):
-    """Raised when the translation backend fails or returns invalid data."""
     pass
 
 
 class Translator:
-    """
-    LibreTranslate REST API — multi-langues
 
-    Notes:
-    - protège les éléments Ren'Py (interpolations [var], tags {i}, \" et \\n)
-    - robuste aux endpoints publics qui renvoient du HTML (Cloudflare/anti-bot/rate-limit)
-    - fallback automatique vers quelques endpoints publics (désactivable en modifiant FALLBACK_ENDPOINTS)
-    """
+    BATCH_SIZE = 100
 
-    # Ren'Py special elements
-    RE_INTERPOLATION = re.compile(r"\[([^\]]+)\]")
-    RE_TEXT_TAG = re.compile(r"\{(/?)([a-zA-Z]+)(?:=[^}]*)?\}")
-    RE_ESCAPED_NEWLINE = re.compile(r"\\\\n")
-    RE_ESCAPED_QUOTE = re.compile(r'\\"')
-
-    # Tokenize segments we must NEVER translate or reorder.
-    # - Ren'Py text tags: {...}
-    # - Interpolations: [...]
-    # - Escaped newline/quote: \\n, \"
-    # - Python-style formatting placeholders: %(name)s, %s, %d, %% (literal percent already escaped)
     RE_TOKEN = re.compile(
         r"(\\\\n|\\\\\"|\{[^}]*\}|\[[^\]]*\]|%\([^)]+\)[#0\- +]?\d*(?:\.\d+)?[a-zA-Z]|%[sdrof]|%%)"
     )
-
-    FALLBACK_ENDPOINTS = [
-        "https://libretranslate.de/translate",
-        "https://translate.cutie.dating/translate",
-    ]
 
     def __init__(self, cfg: TranslatorConfig):
         self.cfg = cfg
         self.cache: dict[str, str] = {}
         self.cancel_requested = False
-        self._placeholders: dict[str, str] = {}
-        self._ph_counter = 0
 
-    # -------------------- public API --------------------
+    # ==========================================================
+    # PUBLIC
+    # ==========================================================
+
     def translate_many(
         self,
         texts: Iterable[str],
         progress_cb: Callable[[int, int], None] | None = None,
+        batch_start_cb: Callable[[int, int], None] | None = None,
+        batch_end_cb: Callable[[int, int], None] | None = None,
         log_cb: Callable[[str, str], None] | None = None,
     ) -> dict[str, str]:
-        unique: list[str] = []
-        for t in texts:
-            if t not in unique:
-                unique.append(t)
 
+        unique = list(dict.fromkeys(texts))
         total = len(unique)
+
+        batches = [
+            unique[i: i + self.BATCH_SIZE]
+            for i in range(0, total, self.BATCH_SIZE)
+        ]
+
         done = 0
+        batch_count = len(batches)
 
-        for text in unique:
+        for batch_index, batch in enumerate(batches):
+
             if self.cancel_requested:
-                raise TranslationError("Traduction annulée par l'utilisateur.")
+                raise TranslationError("Translation cancelled by user.")
 
-            translated = self._translate_one(text)
-            self.cache[text] = translated
+            if batch_start_cb:
+                batch_start_cb(batch_index + 1, batch_count)
 
-            done += 1
-            if progress_cb:
-                progress_cb(done, total)
-            if log_cb:
-                log_cb(text, translated)
+            translations = self._translate_batch(batch)
+
+            if batch_end_cb:
+                batch_end_cb(batch_index + 1, batch_count)
+
+            for original, translated in zip(batch, translations):
+                self.cache[original] = translated
+                done += 1
+
+                if progress_cb:
+                    progress_cb(done, total)
+
+                if log_cb:
+                    log_cb(original, translated)
 
         return dict(self.cache)
 
     def cancel(self):
         self.cancel_requested = True
 
-    # -------------------- internals --------------------
-    def _make_placeholder(self, original: str) -> str:
-        ph = f"__RENPY_PH_{self._ph_counter}__"
-        self._ph_counter += 1
-        self._placeholders[ph] = original
-        return ph
-
-    def _protect(self, text: str) -> str:
-        # order matters: handle escaped sequences first
-        text = self.RE_ESCAPED_NEWLINE.sub(lambda m: self._make_placeholder(m.group(0)), text)
-        text = self.RE_ESCAPED_QUOTE.sub(lambda m: self._make_placeholder(m.group(0)), text)
-        text = self.RE_TEXT_TAG.sub(lambda m: self._make_placeholder(m.group(0)), text)
-        text = self.RE_INTERPOLATION.sub(lambda m: self._make_placeholder(m.group(0)), text)
-        return text
-
-    def _restore(self, text: str) -> str:
-        for ph, original in sorted(self._placeholders.items(), key=lambda x: -len(x[0])):
-            text = text.replace(ph, original)
-        self._placeholders.clear()
-        self._ph_counter = 0
-        return text
+    # ==========================================================
+    # INTERNAL
+    # ==========================================================
 
     def _normalize_endpoint(self, url: str) -> str:
         u = (url or "").strip()
-        if not u:
-            return ""
         if u.endswith("/"):
             u = u[:-1]
-        # Accept base host like http://localhost:5000 and auto-add /translate
         if not u.endswith("/translate"):
-            u = u + "/translate"
+            u += "/translate"
         return u
 
-    def _translate_one(self, text: str) -> str:
-        # Split the string into "protected tokens" + "plain text" segments.
-        # We translate ONLY the plain text segments, keeping tokens untouched and in place.
-        parts: list[str] = []
-        last = 0
-        for m in self.RE_TOKEN.finditer(text):
-            if m.start() > last:
-                plain = text[last:m.start()]
-                parts.append(self._translate_plain_segment(plain))
-            parts.append(m.group(0))  # keep token exactly as-is
-            last = m.end()
+    def _translate_batch(self, texts: list[str]) -> list[str]:
 
-        if last < len(text):
-            parts.append(self._translate_plain_segment(text[last:]))
+        protected_texts = []
+        token_maps = []
 
-        return "".join(parts)
+        for text in texts:
+            protected, mapping = self._protect_tokens(text)
+            protected_texts.append(protected)
+            token_maps.append(mapping)
 
-    def _translate_plain_segment(self, segment: str) -> str:
-        # Skip empty/whitespace-only segments (avoid useless API calls).
-        if not segment or segment.strip() == "":
-            return segment
+        translated_segments = self._translate_raw_batch(protected_texts)
 
-        translated = self._translate_raw_with_fallbacks(segment)
+        results = []
 
-        # IMPORTANT:
-        # Ren'Py uses Python-style % formatting internally when displaying dialogue.
-        # Any literal '%' must be escaped as '%%' or it can crash with "incomplete format".
-        # We already protect real placeholders like %s / %(name)s via RE_TOKEN, so remaining
-        # percent signs are treated as literal.
-        translated = translated.replace("%", "%%")
-        return translated
+        for translated, mapping in zip(translated_segments, token_maps):
+            restored = self._restore_tokens(translated, mapping)
+            restored = restored.replace("%", "%%")
+            results.append(restored)
 
-    def _translate_raw_with_fallbacks(self, text: str) -> str:
-        endpoints = [self.cfg.endpoint] + [e for e in self.FALLBACK_ENDPOINTS if e != self.cfg.endpoint]
-        last_err: Exception | None = None
+        return results
 
-        for ep in endpoints:
-            ep = self._normalize_endpoint(ep)
-            if not ep:
-                continue
-            try:
-                return self._post_translate(ep, text)
-            except Exception as e:
-                last_err = e
-                continue
+    def _translate_raw_batch(self, texts: list[str]) -> list[str]:
 
-        if last_err:
-            raise TranslationError(str(last_err))
-        raise TranslationError("Impossible de traduire : aucun endpoint disponible.")
+        ep = self._normalize_endpoint(self.cfg.endpoint)
 
-    def _post_translate(self, endpoint: str, text: str) -> str:
         payload = {
-            "q": text,
+            "q": texts,
             "source": self.cfg.source_lang,
             "target": self.cfg.target_lang,
             "format": "text",
@@ -192,34 +130,81 @@ class Translator:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "RenpyTranslator/1.0 (requests)",
         }
 
-        try:
-            r = requests.post(endpoint, json=payload, headers=headers, timeout=self.cfg.timeout_s)
-        except requests.RequestException as e:
-            raise TranslationError("Impossible de contacter le serveur de traduction.") from e
+        r = requests.post(
+            ep,
+            json=payload,
+            headers=headers,
+            timeout=self.cfg.timeout_s,
+        )
 
         if r.status_code != 200:
-            snippet = (r.text or "").strip().replace("\n", " ")[:180]
-            raise TranslationError(f"Erreur serveur ({r.status_code}). Réponse: {snippet}")
+            raise TranslationError(f"Server error {r.status_code}")
 
-        # Some public endpoints return HTML pages (anti-bot) -> not JSON
-        content_type = (r.headers.get("Content-Type") or "").lower()
-        try:
-            data = r.json()
-        except ValueError:
-            snippet = (r.text or "").strip().replace("\n", " ")[:180]
-            raise TranslationError(
-                "Réponse invalide du serveur de traduction (HTML/anti-bot probable). "
-                f"Endpoint: {endpoint} | Aperçu: {snippet}"
-            )
+        data = r.json()
 
-        translated = data.get("translatedText")
-        if not translated:
-            err = data.get("error")
-            if err:
-                raise TranslationError(f"Erreur API: {err}")
-            raise TranslationError("Traduction vide.")
+        if isinstance(data, list):
+            return [item.get("translatedText", "") for item in data]
 
-        return translated
+        if isinstance(data, dict):
+            if isinstance(data.get("translatedText"), list):
+                return data["translatedText"]
+            if isinstance(data.get("translatedText"), str):
+                return [data["translatedText"]]
+
+        raise TranslationError("Unexpected API response structure.")
+
+    # ==========================================================
+    # TOKEN PROTECTION
+    # ==========================================================
+
+    def _protect_tokens(self, text: str):
+        """
+        Remplace les tokens Ren'Py par des placeholders très stables.
+        Exemple: ⟪RNT0⟫, ⟪RNT1⟫ ...
+        """
+        mapping = {}
+        counter = 0
+
+        def replacer(match):
+            nonlocal counter
+            key = f"⟪RNT{counter}⟫"
+            mapping[key] = match.group(0)
+            counter += 1
+            return key
+
+        protected = self.RE_TOKEN.sub(replacer, text)
+        return protected, mapping
+
+    def _restore_tokens(self, text: str, mapping: dict[str, str]) -> str:
+        """
+        Restore:
+        - exact tokens (⟪RNT0⟫)
+        - tolerance: si l'API a "cassé" le token (espaces, ponctuation enlevée)
+          on tente une restauration en mode "normalisé".
+        """
+
+        # 1) Restore exact (rapide)
+        for key, value in mapping.items():
+            text = text.replace(key, value)
+
+        # 2) Restore tolérant (si l'API a modifié le token)
+        # Normalisation: on garde que A-Z0-9
+        def norm(s: str) -> str:
+            return re.sub(r"[^A-Za-z0-9]", "", s).upper()
+
+        norm_map = {norm(k): v for k, v in mapping.items()}
+        if not norm_map:
+            return text
+
+        # On remplace toute séquence qui ressemble à un token (même cassé)
+        # ex: "RNT 0", "⟪ RNT0 ⟫", "R N T 0"
+        def repl(m):
+            candidate = norm(m.group(0))
+            return norm_map.get(candidate, m.group(0))
+
+        # Cherche des formes type RNT + chiffre(s) avec du bruit entre
+        text = re.sub(r"(?:⟪\s*)?R\s*N\s*T\s*\d+(?:\s*⟫)?", repl, text, flags=re.IGNORECASE)
+
+        return text

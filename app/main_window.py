@@ -1,4 +1,5 @@
-"""Ren'Py Translator - Main Qt window and UI workflow.
+"""
+Ren'Py Translator - Main Qt window and UI workflow.
 
 This file contains the main application window and the dialogs/workers that
 power the translation workflow:
@@ -8,6 +9,11 @@ power the translation workflow:
 - Translating strings (local or remote endpoint)
 - Writing Ren'Py translation files under game/tl/<lang>/
 - Previewing changes and applying/rolling back modifications
+
+ADDON (requested):
+- Left panel file explorer for game/ tree (folders + files)
+- After Analyze: status icon per file (analyzed / not analyzed / useless / impossible)
+  + number of extracted dialogue/text lines per script file.
 """
 
 from __future__ import annotations
@@ -16,15 +22,19 @@ from pathlib import Path
 import re
 import requests
 import shutil
+
 from core.tl_writer import write_tl_strings_file, write_runtime_filter_assets
+
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QPlainTextEdit,
     QProgressBar, QLineEdit, QMessageBox, QDialog, QComboBox,
-    QListWidget, QTableWidget, QTableWidgetItem, QSplitter, QGroupBox
+    QListWidget, QTableWidget, QTableWidgetItem, QSplitter, QGroupBox,
+    QMenuBar, QToolButton, QSizePolicy,
+    QTreeWidget, QTreeWidgetItem, QHeaderView, QStyle
 )
-from PySide6.QtCore import QThread, Signal, QObject, QSettings, Qt
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QThread, Signal, QObject, QSettings, Qt, QPoint
+from PySide6.QtGui import QAction, QIcon
 
 from core.project_scanner import (
     detect_renpy_project,
@@ -38,6 +48,7 @@ from core.translator import Translator, TranslatorConfig, TranslationError
 from core.rpy_rewriter import rewrite_rpy_file, backup_rpy_file, restore_rpy_file
 
 from app.settings import SettingsDialog, UI_TEXTS
+from app.theme import qss_dark
 
 
 DEFAULT_PUBLIC_ENDPOINT = "https://libretranslate.de/translate"
@@ -151,6 +162,7 @@ class ChangesViewerDialog(QDialog):
     """Dialog that previews changes made to scripts/translation outputs."""
     def __init__(self, game_dir: Path, t_func, parent=None):
         super().__init__(parent)
+
         self.game_dir = Path(game_dir)
         self.t = t_func
 
@@ -306,6 +318,10 @@ class TranslateWorker(QObject):
     finished = Signal(int, int)  # modified_files, backups_created
     error = Signal(str)
 
+    # batch signals (for 2nd progress bar)
+    batch_started = Signal(int, int)   # current_batch, total_batches
+    batch_finished = Signal(int, int)  # current_batch, total_batches
+
     def __init__(self, game_dir: Path, extracted, endpoint: str, src: str, tgt: str):
         super().__init__()
         self.game_dir = Path(game_dir)
@@ -355,7 +371,19 @@ class TranslateWorker(QObject):
             def on_log(src_text, dst_text):
                 self.log.emit(f'✔ "{src_text[:120]}" → "{dst_text[:120]}"')
 
-            translations = translator.translate_many(unique, progress_cb=on_progress, log_cb=on_log)
+            def on_batch_start(current_batch: int, total_batches: int):
+                self.batch_started.emit(current_batch, total_batches)
+
+            def on_batch_end(current_batch: int, total_batches: int):
+                self.batch_finished.emit(current_batch, total_batches)
+
+            translations = translator.translate_many(
+                unique,
+                progress_cb=on_progress,
+                batch_start_cb=on_batch_start,
+                batch_end_cb=on_batch_end,
+                log_cb=on_log
+            )
 
             self.log.emit("✍️ Writing Ren'Py translation file (game/tl/<lang>/)…")
             self.progress.emit(70)
@@ -384,6 +412,83 @@ class TranslateWorker(QObject):
             self.error.emit(str(e))
         except Exception as e:
             self.error.emit(f"Unexpected error: {e}")
+
+
+# =====================================================
+# Top Bar (Menu + Window Controls)
+# =====================================================
+class TopBar(QWidget):
+    """Custom top bar that hosts the menu and the window controls (min/max/close)."""
+
+    def __init__(self, parent_window: QMainWindow):
+        super().__init__(parent_window)
+        self._window = parent_window
+        self._drag_pos: QPoint | None = None
+
+        self.setObjectName("TopBar")
+        self.setFixedHeight(36)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 0, 10, 0)
+        layout.setSpacing(10)
+
+        # Menu bar (left)
+        self.menubar = QMenuBar(self)
+        self.menubar.setObjectName("TopMenuBar")
+        self.menubar.setNativeMenuBar(False)
+
+        layout.addWidget(self.menubar, 1)
+
+        # Window buttons (right) - 3 dots style
+        self.btn_min = QToolButton(self)
+        self.btn_min.setObjectName("WinBtnMin")
+        self.btn_min.setToolTip("Minimize")
+        self.btn_min.setFixedSize(14, 14)
+        self.btn_min.clicked.connect(self._window.showMinimized)
+
+        self.btn_max = QToolButton(self)
+        self.btn_max.setObjectName("WinBtnMax")
+        self.btn_max.setToolTip("Maximize / Restore")
+        self.btn_max.setFixedSize(14, 14)
+        self.btn_max.clicked.connect(self._toggle_max_restore)
+
+        self.btn_close = QToolButton(self)
+        self.btn_close.setObjectName("WinBtnClose")
+        self.btn_close.setToolTip("Close")
+        self.btn_close.setFixedSize(14, 14)
+        self.btn_close.clicked.connect(self._window.close)
+
+        layout.addWidget(self.btn_min)
+        layout.addWidget(self.btn_max)
+        layout.addWidget(self.btn_close)
+
+    def _toggle_max_restore(self) -> None:
+        if self._window.isMaximized():
+            self._window.showNormal()
+        else:
+            self._window.showMaximized()
+
+    # ---- Drag handling (move the frameless window) ----
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._drag_pos = e.globalPosition().toPoint() - self._window.frameGeometry().topLeft()
+            e.accept()
+
+    def mouseMoveEvent(self, e):
+        if self._drag_pos is not None and (e.buttons() & Qt.LeftButton):
+            self._window.move(e.globalPosition().toPoint() - self._drag_pos)
+            e.accept()
+
+    def mouseReleaseEvent(self, e):
+        self._drag_pos = None
+        e.accept()
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._toggle_max_restore()
+            e.accept()
+
+
 # =====================================================
 # Main Window
 # =====================================================
@@ -392,21 +497,28 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
+        # Frameless window (remove native Windows title bar)
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+
+        # Custom top bar: menu (left) + window buttons (right)
+        self.top_bar = TopBar(self)
+        self.setMenuWidget(self.top_bar)
+
         self.qs = QSettings("RenPyTranslator", "RenPyTranslatorPro")
         self.ui_lang = self.qs.value("ui/lang", "en")
-        self.ui_theme = self.qs.value("ui/theme", "light")
+        self.ui_theme = "dark"
         self.endpoint_mode = self.qs.value("net/endpoint_mode", "public")
         self.custom_endpoint = self.qs.value("net/custom_endpoint", DEFAULT_PUBLIC_ENDPOINT)
 
         if self.ui_lang not in UI_TEXTS:
             self.ui_lang = "en"
         if self.ui_theme not in ("light", "dark"):
-            self.ui_theme = "light"
+            self.ui_theme = "dark"
         if self.endpoint_mode not in ("public", "local"):
             self.endpoint_mode = "public"
 
-        self.setMinimumSize(950, 650)
-        self.resize(1100, 760)
+        self.setMinimumSize(1050, 650)
+        self.resize(1250, 780)
 
         self.project_root: Path | None = None
         self.game_dir: Path | None = None
@@ -417,12 +529,18 @@ class MainWindow(QMainWindow):
         self.thread: QThread | None = None
         self.worker: TranslateWorker | None = None
 
+        # Analysis state for the left tree panel
+        self._analysis_ran = False
+        self._file_dialogue_counts: dict[str, int] = {}   # relpath -> count
+        self._tree_item_by_rel: dict[str, QTreeWidgetItem] = {}
+
         self._build_menu()
 
         root = QWidget()
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
 
+        # --- Row 1: project picker ---
         row1 = QHBoxLayout()
         self.pick_btn = QPushButton()
         self.pick_btn.clicked.connect(self.pick_project)
@@ -431,6 +549,7 @@ class MainWindow(QMainWindow):
         row1.addWidget(self.project_label, 1)
         layout.addLayout(row1)
 
+        # --- Row 2: endpoint + local ---
         row2 = QHBoxLayout()
         self.endpoint_label = QLabel()
         self.endpoint_edit = QLineEdit()
@@ -443,6 +562,7 @@ class MainWindow(QMainWindow):
         row2.addWidget(self.local_btn)
         layout.addLayout(row2)
 
+        # --- Row: languages ---
         row_lang = QHBoxLayout()
         self.src_label = QLabel()
         self.src_combo = QComboBox()
@@ -462,6 +582,7 @@ class MainWindow(QMainWindow):
         row_lang.addWidget(self.tgt_combo)
         layout.addLayout(row_lang)
 
+        # --- Row 3: actions ---
         row3 = QHBoxLayout()
         self.analyze_btn = QPushButton()
         self.analyze_btn.clicked.connect(self.analyze)
@@ -489,13 +610,51 @@ class MainWindow(QMainWindow):
         row3.addWidget(self.apply_btn)
         layout.addLayout(row3)
 
+        # --- Progress bars ---
         self.progress = QProgressBar()
         layout.addWidget(self.progress)
 
+        self.batch_progress = QProgressBar()
+        self.batch_progress.setRange(0, 1)
+        self.batch_progress.setValue(0)
+        self.batch_progress.setFormat("Batch: idle")
+        layout.addWidget(self.batch_progress)
+
+        # =========================================================
+        # MAIN SPLITTER: LEFT (game tree) | RIGHT (logs)
+        # =========================================================
+        self.main_splitter = QSplitter(Qt.Horizontal)
+
+        left_box = QGroupBox("game/ explorer")
+        left_layout = QVBoxLayout(left_box)
+
+        self.game_tree = QTreeWidget()
+        self.game_tree.setColumnCount(3)
+        self.game_tree.setHeaderLabels(["Path", "Status", "Dialogues"])
+        self.game_tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.game_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.game_tree.header().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.game_tree.setUniformRowHeights(True)
+        self.game_tree.setIndentation(18)
+        self.game_tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
+
+        left_layout.addWidget(self.game_tree)
+
+        right_box = QGroupBox("Logs")
+        right_layout = QVBoxLayout(right_box)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
-        layout.addWidget(self.log, 1)
+        right_layout.addWidget(self.log)
 
+        self.main_splitter.addWidget(left_box)
+        self.main_splitter.addWidget(right_box)
+        self.main_splitter.setStretchFactor(0, 2)
+        self.main_splitter.setStretchFactor(1, 3)
+        self.main_splitter.setSizes([420, 830])
+
+        layout.addWidget(self.main_splitter, 1)
+
+        # --- final init ---
         self.apply_theme(self.ui_theme)
         self._apply_saved_endpoint_mode()
         self.retranslate_ui()
@@ -548,25 +707,18 @@ class MainWindow(QMainWindow):
 
     # ---------- theme ----------
     def apply_theme(self, theme: str):
+        """Apply the global application theme (QSS)."""
+        app = QApplication.instance()
+        if not app:
+            return
         if theme == "dark":
-            self.setStyleSheet("""
-                QWidget { background: #1e1e1e; color: #eaeaea; }
-                QLineEdit, QPlainTextEdit, QComboBox, QProgressBar {
-                    background: #2a2a2a; color: #eaeaea; border: 1px solid #3a3a3a;
-                }
-                QPushButton { background: #2d2d2d; border: 1px solid #3a3a3a; padding: 6px; }
-                QPushButton:hover { background: #3a3a3a; }
-                QMenuBar { background: #1e1e1e; }
-                QMenuBar::item:selected { background: #333333; }
-                QMenu { background: #1e1e1e; }
-                QMenu::item:selected { background: #333333; }
-            """)
+            app.setStyleSheet(qss_dark())
         else:
-            self.setStyleSheet("")
+            app.setStyleSheet("")
 
     # ---------- menu ----------
     def _build_menu(self):
-        menubar = self.menuBar()
+        menubar = self.top_bar.menubar
 
         self.menu_home = menubar.addMenu("Home")
         self.menu_project = menubar.addMenu("Project")
@@ -657,6 +809,7 @@ class MainWindow(QMainWindow):
         self.endpoint_edit.setEnabled(not busy)
         self.src_combo.setEnabled(not busy)
         self.tgt_combo.setEnabled(not busy)
+        self.game_tree.setEnabled(not busy)
 
         if busy:
             self.translate_btn.setEnabled(False)
@@ -692,6 +845,148 @@ class MainWindow(QMainWindow):
 
         self.act_prepare_packaged.setEnabled(need_prepare_packaged)
 
+    # ---------- batch progress handlers ----------
+    def _on_batch_started(self, current_batch: int, total_batches: int):
+        self.batch_progress.setRange(0, 0)
+        self.batch_progress.setValue(0)
+        self.batch_progress.setFormat(f"Batch {current_batch}/{total_batches}: translating…")
+
+    def _on_batch_finished(self, current_batch: int, total_batches: int):
+        self.batch_progress.setRange(0, 1)
+        self.batch_progress.setValue(1)
+        self.batch_progress.setFormat(f"Batch {current_batch}/{total_batches}: done")
+
+    def _reset_batch_progress(self):
+        self.batch_progress.setRange(0, 1)
+        self.batch_progress.setValue(0)
+        self.batch_progress.setFormat("Batch: idle")
+
+    # =========================================================
+    # LEFT PANEL: tree + analysis statuses
+    # =========================================================
+    def _std_icon(self, sp: QStyle.StandardPixmap) -> QIcon:
+        return self.style().standardIcon(sp)
+
+    def _is_excluded_rel(self, rel: str) -> bool:
+        # always ignore tl/ subtree
+        rel = rel.replace("\\", "/")
+        return rel == "tl" or rel.startswith("tl/") or "/tl/" in rel
+
+    def _path_to_rel(self, p: Path) -> str:
+        assert self.game_dir is not None
+        return str(p.relative_to(self.game_dir)).replace("\\", "/")
+
+    def _set_item_status(self, item: QTreeWidgetItem, status_text: str, icon: QIcon | None, count: int | None):
+        # column 1 = Status, column 2 = Dialogues
+        item.setText(1, status_text)
+        if icon is not None:
+            item.setIcon(1, icon)
+        else:
+            item.setIcon(1, QIcon())
+
+        if count is None:
+            item.setText(2, "")
+        else:
+            item.setText(2, str(int(count)))
+
+    def _populate_game_tree(self):
+        """Build the tree for game/ (folders + files), excluding game/tl/."""
+        self.game_tree.clear()
+        self._tree_item_by_rel.clear()
+        self._analysis_ran = False
+        self._file_dialogue_counts = {}
+
+        if not self.game_dir or not self.game_dir.exists():
+            return
+
+        root_item = QTreeWidgetItem([self.game_dir.name, "", ""])
+        root_item.setIcon(0, self._std_icon(QStyle.SP_DirIcon))
+        root_item.setExpanded(True)
+        self.game_tree.addTopLevelItem(root_item)
+
+        def add_children(parent_item: QTreeWidgetItem, folder: Path):
+            try:
+                entries = sorted(folder.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+            except Exception:
+                return
+
+            for child in entries:
+                rel = self._path_to_rel(child)
+                if self._is_excluded_rel(rel):
+                    continue
+
+                if child.is_dir():
+                    it = QTreeWidgetItem([child.name, "", ""])
+                    it.setIcon(0, self._std_icon(QStyle.SP_DirIcon))
+                    it.setData(0, Qt.UserRole, str(child))
+                    parent_item.addChild(it)
+                    add_children(it, child)
+                else:
+                    it = QTreeWidgetItem([child.name, "", ""])
+                    it.setIcon(0, self._std_icon(QStyle.SP_FileIcon))
+                    it.setData(0, Qt.UserRole, str(child))
+                    parent_item.addChild(it)
+
+                    # map only files by rel
+                    self._tree_item_by_rel[rel] = it
+
+        add_children(root_item, self.game_dir)
+
+        self.game_tree.expandToDepth(1)
+        self._update_tree_status_before_analysis()
+
+    def _update_tree_status_before_analysis(self):
+        """Before analyze: mark script files as 'not analyzed yet' and others as N/A/impossible."""
+        if not self.game_dir:
+            return
+
+        # icons
+        ico_pending = self._std_icon(QStyle.SP_BrowserReload)      # 🕒
+        ico_na = self._std_icon(QStyle.SP_DialogResetButton)       # ⏺
+        ico_block = self._std_icon(QStyle.SP_MessageBoxCritical)   # ⛔
+
+        for rel, item in self._tree_item_by_rel.items():
+            rp = rel.lower()
+
+            if rp.endswith(".rpy") or rp.endswith(".rpym"):
+                self._set_item_status(item, "🕒 Not analyzed", ico_pending, None)
+            elif rp.endswith(".rpa") or rp.endswith(".rpyc") or rp.endswith(".rpyb") or rp.endswith(".rpymc"):
+                self._set_item_status(item, "⛔ Not analyzable", ico_block, None)
+            else:
+                self._set_item_status(item, "⏺ N/A", ico_na, None)
+
+    def _update_tree_status_after_analysis(self, counts: dict[str, int]):
+        """After analyze: scripts get analyzed/useless + count; packaged compiled/archives stay blocked."""
+        ico_ok = self._std_icon(QStyle.SP_DialogApplyButton)       # ✅
+        ico_useless = self._std_icon(QStyle.SP_DialogDiscardButton)  # ➖
+        ico_block = self._std_icon(QStyle.SP_MessageBoxCritical)   # ⛔
+        ico_na = self._std_icon(QStyle.SP_DialogResetButton)       # ⏺
+
+        for rel, item in self._tree_item_by_rel.items():
+            rp = rel.lower()
+
+            if rp.endswith(".rpy") or rp.endswith(".rpym"):
+                c = int(counts.get(rel, 0))
+                if c > 0:
+                    self._set_item_status(item, "✅ Analyzed", ico_ok, c)
+                else:
+                    # analyzed, but no translatable strings found => "useless to analyze"
+                    self._set_item_status(item, "➖ Useless (0)", ico_useless, 0)
+            elif rp.endswith(".rpa") or rp.endswith(".rpyc") or rp.endswith(".rpyb") or rp.endswith(".rpymc"):
+                self._set_item_status(item, "⛔ Not analyzable", ico_block, None)
+            else:
+                self._set_item_status(item, "⏺ N/A", ico_na, None)
+
+    def _on_tree_selection_changed(self):
+        """Optional: show selected file path in the status bar / logs (no heavy actions)."""
+        items = self.game_tree.selectedItems()
+        if not items:
+            return
+        it = items[0]
+        p = it.data(0, Qt.UserRole)
+        if p:
+            self.statusBar().showMessage(str(p))
+
     # ---------- actions ----------
     def go_home(self):
         self.statusBar().showMessage(self.t("menu_home"))
@@ -718,14 +1013,14 @@ class MainWindow(QMainWindow):
 
     def on_settings_changed(self, new_lang: str, new_theme: str, new_endpoint_mode: str):
         self.ui_lang = new_lang if new_lang in UI_TEXTS else "en"
-        self.ui_theme = new_theme if new_theme in ("light", "dark") else "light"
+        self.ui_theme = "dark"  # forced
         self.endpoint_mode = new_endpoint_mode if new_endpoint_mode in ("public", "local") else "public"
 
         self.qs.setValue("ui/lang", self.ui_lang)
-        self.qs.setValue("ui/theme", self.ui_theme)
+        self.qs.setValue("ui/theme", "dark")
         self.qs.setValue("net/endpoint_mode", self.endpoint_mode)
 
-        self.apply_theme(self.ui_theme)
+        self.apply_theme("dark")
         self._apply_saved_endpoint_mode()
         self.retranslate_ui()
 
@@ -749,6 +1044,10 @@ class MainWindow(QMainWindow):
         self.workspace_root = None
         self.extracted = []
         self.progress.setValue(0)
+        self._reset_batch_progress()
+
+        # refresh left tree
+        self._populate_game_tree()
 
         if self.game_dir is not None:
             has_rpy = bool(list_game_rpy_files(self.game_dir))
@@ -778,6 +1077,10 @@ class MainWindow(QMainWindow):
         self.game_dir = result.game_dir
         self.extracted = []
         self.progress.setValue(0)
+        self._reset_batch_progress()
+
+        # refresh left tree for workspace game/
+        self._populate_game_tree()
 
         self.retranslate_ui()
         self.log.appendPlainText("✅ " + self.t("prepare_packaged_done"))
@@ -793,9 +1096,29 @@ class MainWindow(QMainWindow):
         result = extract_strings(self.game_dir)
         self.extracted = result.items
 
-        self.log.appendPlainText(f"✅ Project loaded.")
-        self.log.appendPlainText(f"📄 Files: .rpy={result.total_files} | .rpyc/.rpymc={len(list_game_compiled_files(self.game_dir))} | .rpa={len(list_game_archives(self.game_dir))}")
-        self.log.appendPlainText(f"🧩 Extracted strings (dialogue/narration/menu): {len(self.extracted)}")
+        # Build counts per file (rel path)
+        counts: dict[str, int] = {}
+        for it in self.extracted:
+            # it.file is already a rel path from game_dir in core/rpy_parser.py
+            rel = (it.file or "").replace("\\", "/")
+            if not rel:
+                continue
+            if self._is_excluded_rel(rel):
+                continue
+            counts[rel] = counts.get(rel, 0) + 1
+
+        self._analysis_ran = True
+        self._file_dialogue_counts = counts
+        self._update_tree_status_after_analysis(counts)
+
+        self.log.appendPlainText("✅ Project loaded.")
+        self.log.appendPlainText(
+            f"📄 Files: .rpy/.rpym={result.total_files} | "
+            f".rpyc/.rpymc/.rpyb={len(list_game_compiled_files(self.game_dir))} | "
+            f".rpa={len(list_game_archives(self.game_dir))}"
+        )
+        self.log.appendPlainText(f"🧩 Extracted strings (dialogue/narration/menu/ui): {len(self.extracted)}")
+        self.log.appendPlainText("📌 Left panel updated: status icons + dialogue count per script.")
 
         self.statusBar().showMessage(self.t("analysis_done"))
         self._refresh_actions_enabled()
@@ -822,6 +1145,7 @@ class MainWindow(QMainWindow):
         self._save_custom_endpoint_if_needed()
 
         self.progress.setValue(0)
+        self._reset_batch_progress()
         self.log.appendPlainText("—" * 45)
         self.statusBar().showMessage(self.t("translating"))
         self._set_busy(True)
@@ -833,6 +1157,10 @@ class MainWindow(QMainWindow):
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.progress.setValue)
         self.worker.log.connect(self.log.appendPlainText)
+
+        self.worker.batch_started.connect(self._on_batch_started)
+        self.worker.batch_finished.connect(self._on_batch_finished)
+
         self.worker.finished.connect(self.on_translation_finished)
         self.worker.error.connect(self.on_translation_error)
 
@@ -845,6 +1173,7 @@ class MainWindow(QMainWindow):
             self.thread.wait(3000)
 
         self._set_busy(False)
+        self._reset_batch_progress()
         self.statusBar().showMessage(self.t("translation_finished"))
         self._refresh_actions_enabled()
 
@@ -861,9 +1190,9 @@ class MainWindow(QMainWindow):
             self.thread.wait(3000)
 
         self._set_busy(False)
+        self._reset_batch_progress()
         self.statusBar().showMessage(self.t("error"))
         QMessageBox.critical(self, self.t("error"), msg)
-
 
     def show_tutorial(self):
         QMessageBox.information(self, self.t("tutorial_title"), self.t("tutorial_text"))

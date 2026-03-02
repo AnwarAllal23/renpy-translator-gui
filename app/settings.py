@@ -1,12 +1,13 @@
 """Ren'Py Translator - Settings dialog and persistence.
 
 The SettingsDialog is responsible for:
-- Showing user preferences (language, theme, endpoint, options)
+- Showing user preferences (language, endpoint mode)
 - Validating user inputs
-- Saving/loading settings to a JSON file in the user's profile directory
+- Emitting settings_changed
 """
 
-# app/settings.py
+from __future__ import annotations
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout,
     QLabel, QPushButton, QComboBox
@@ -90,15 +91,11 @@ UI_TEXTS = {
             "Ren'Py Translator — Pro\n\n"
             "• Translates dialogue/narration/menu choices in .rpy files\n"
             "• Creates .bak backups automatically before translating\n"
-            "• Restore originals anytime from backups\n"
-            "• Saves theme/language/endpoint mode across restarts\n",
+            "• Restore originals anytime from backups\n",
 
         # Settings dialog
         "settings": "Settings",
         "language": "Application language",
-        "theme": "Theme",
-        "light": "Light",
-        "dark": "Dark",
         "endpoint_mode": "Translation endpoint",
         "endpoint_public": "Public (online)",
         "endpoint_local": "Local (localhost)",
@@ -107,28 +104,40 @@ UI_TEXTS = {
 
         # Misc
         "restore_done": "Restore done.",
-    
+
         "apply_to_original": "Apply to original game",
-    
         "apply_title": "Apply translation",
-    
         "apply_confirm": "This will copy the generated translation back into the ORIGINAL game folder (game/tl/<lang>/).\n\nContinue?",
-    
         "apply_done": "Translation copied to original game.",
-    
         "apply_error": "Failed to apply translation.",
-    
         "apply_not_packaged": "This button is only useful when you prepared a packaged game (workspace).",
-    
         "apply_missing_lang": "No target language selected.",
-    
         "apply_nothing_to_apply": "No tl/<lang>/ folder found in the workspace. Translate first.",
-    
-        "act_tutorial": "How to translate a Ren\'Py game…",
-    
-        "tutorial_title": "Ren\'Py translation tutorial",
-    
-        "tutorial_text": ("Step 1 — Choose the game\n""• Click ‘Choose game’ and select the project folder (the one that contains game/).\n\n""Step 2 — If the game is PACKAGED\n""• If the tool warns that there are no .rpy sources, go to Tools → Prepare packaged game.\n""• This creates a workspace where .rpa are extracted and compiled scripts are decompiled (best effort).\n\n""Step 3 — Analyze\n""• Click Analyze to scan scripts and extract user-visible strings (dialogue, narration, menu, some UI).\n\n""Step 4 — Pick languages\n""• Source language = the language currently in the game.\n""• Target language = the language you want (ex: French = fr).\n\n""Step 5 — Choose a translation endpoint\n""• Public: uses an online LibreTranslate endpoint (may be rate-limited).\n""• Local (advanced): run LibreTranslate with Docker, then click Local.\n\n""Step 6 — Translate\n""• Click Translate. The app generates: game/tl/<lang>/zz_auto_strings.rpy + runtime filter files.\n""• The tl/<lang>/ folder is created automatically if missing.\n\n""Step 7 — Apply (only for packaged workspace)\n""• If you used a workspace, click ‘Apply to original game’ to copy tl/<lang>/ into the real game folder.\n\n""Step 8 — Test in Ren\'Py\n""• Start the game, then switch language in Ren\'Py (Preferences / Language) if available.\n""• If the game has no language selector, you can add one in your project, or set config.language in code.\n\n""Tips\n""• Some UI strings are not caught if they are built dynamically in python/screens.\n""• Always keep a backup of the original game folder before modifying anything."),
+
+        "act_tutorial": "How to translate a Ren'Py game…",
+        "tutorial_title": "Ren'Py translation tutorial",
+        "tutorial_text": (
+            "Step 1 — Choose the game\n"
+            "• Click ‘Choose game’ and select the project folder (the one that contains game/).\n\n"
+            "Step 2 — If the game is PACKAGED\n"
+            "• If the tool warns that there are no .rpy sources, go to Tools → Prepare packaged game.\n"
+            "• This creates a workspace where .rpa are extracted and compiled scripts are decompiled (best effort).\n\n"
+            "Step 3 — Analyze\n"
+            "• Click Analyze to scan scripts and extract user-visible strings (dialogue, narration, menu, some UI).\n\n"
+            "Step 4 — Pick languages\n"
+            "• Source language = the language currently in the game.\n"
+            "• Target language = the language you want (ex: French = fr).\n\n"
+            "Step 5 — Choose a translation endpoint\n"
+            "• Public: uses an online LibreTranslate endpoint (may be rate-limited).\n"
+            "• Local (advanced): run LibreTranslate with Docker, then click Local.\n\n"
+            "Step 6 — Translate\n"
+            "• Click Translate. The app generates: game/tl/<lang>/zz_auto_strings.rpy + runtime filter files.\n"
+            "• The tl/<lang>/ folder is created automatically if missing.\n\n"
+            "Step 7 — Apply (only for packaged workspace)\n"
+            "• If you used a workspace, click ‘Apply to original game’ to copy tl/<lang>/ into the real game folder.\n\n"
+            "Step 8 — Test in Ren'Py\n"
+            "• Start the game, then switch language in Ren'Py (Preferences / Language) if available.\n"
+        ),
     },
 
     "fr": {
@@ -199,14 +208,10 @@ UI_TEXTS = {
             "Ren'Py Translator — Pro\n\n"
             "• Traduit les textes (dialogue/narration/choix menu) dans les fichiers .rpy\n"
             "• Crée automatiquement des backups .bak avant de traduire\n"
-            "• Restaure les originaux à tout moment\n"
-            "• Sauvegarde thème/langue/mode endpoint\n",
+            "• Restaure les originaux à tout moment\n",
 
         "settings": "Paramètres",
         "language": "Langue de l'application",
-        "theme": "Thème",
-        "light": "Clair",
-        "dark": "Sombre",
         "endpoint_mode": "Endpoint de traduction",
         "endpoint_public": "Public (en ligne)",
         "endpoint_local": "Local (localhost)",
@@ -214,28 +219,19 @@ UI_TEXTS = {
         "cancel": "Annuler",
 
         "restore_done": "Restauration terminée.",
-    
+
         "apply_to_original": "Appliquer au jeu original",
-    
         "apply_title": "Appliquer la traduction",
-    
         "apply_confirm": "Ça va copier la traduction générée vers le dossier ORIGINAL du jeu (game/tl/<lang>/).\n\nContinuer ?",
-    
         "apply_done": "Traduction copiée dans le jeu original.",
-    
-        "apply_error": "Échec de l\'application de la traduction.",
-    
+        "apply_error": "Échec de l'application de la traduction.",
         "apply_not_packaged": "Ce bouton sert surtout quand tu as préparé un jeu packagé (workspace).",
-    
         "apply_missing_lang": "Aucune langue cible sélectionnée.",
-    
-        "apply_nothing_to_apply": "Aucun dossier tl/<lang>/ trouvé dans le workspace. Traduis d\'abord.",
-    
-        "act_tutorial": "Tutoriel : traduire un jeu Ren\'Py…",
-    
-        "tutorial_title": "Tutoriel de traduction Ren\'Py",
-    
-        "tutorial_text": ("Étape 1 — Choisir le jeu\n""• Clique sur ‘Choisir un jeu’ et sélectionne le dossier du projet (celui qui contient game/).\n\n""Étape 2 — Si le jeu est PACKAGÉ\n""• Si l\'outil dit qu\'il n\'y a pas de .rpy, va dans Outils → Préparer un jeu packagé.\n""• Ça crée un workspace où les .rpa sont extraits et les scripts compilés sont décompilés (best effort).\n\n""Étape 3 — Analyser\n""• Clique sur Analyser pour scanner les scripts et extraire les textes visibles (dialogue, narration, menus, un peu d\'UI).\n\n""Étape 4 — Choisir les langues\n""• Langue source = langue actuelle du jeu.\n""• Langue cible = langue voulue (ex : Français = fr).\n\n""Étape 5 — Endpoint de traduction\n""• Public : endpoint LibreTranslate en ligne (peut être limité).\n""• Local (avancé) : LibreTranslate en local avec Docker, puis clique sur Local.\n\n""Étape 6 — Traduire\n""• Clique sur Traduire. L\'app génère : game/tl/<lang>/zz_auto_strings.rpy + fichiers runtime.\n""• Le dossier tl/<lang>/ est créé automatiquement si besoin.\n\n""Étape 7 — Appliquer (uniquement si workspace packagé)\n""• Si tu es dans un workspace, clique sur ‘Appliquer au jeu original’ pour recopier tl/<lang>/ dans le vrai jeu.\n\n""Étape 8 — Tester\n""• Lance le jeu puis change la langue dans Ren\'Py (Préférences / Langue) si l\'option existe.\n""• Sinon, il faudra ajouter un sélecteur de langue dans ton projet ou définir config.language.\n\n""Conseils\n""• Certains textes UI peuvent être dynamiques et donc non capturés.\n""• Fais toujours une copie de sauvegarde du jeu avant de modifier quoi que ce soit."),
+        "apply_nothing_to_apply": "Aucun dossier tl/<lang>/ trouvé dans le workspace. Traduis d'abord.",
+
+        "act_tutorial": "Tutoriel : traduire un jeu Ren'Py…",
+        "tutorial_title": "Tutoriel de traduction Ren'Py",
+        "tutorial_text": "Voir l'aide dans l'app.",
     },
 
     "es": {
@@ -302,60 +298,32 @@ UI_TEXTS = {
         "act_about": "Acerca de",
 
         "about_title": "Acerca de",
-        "about_text":
-            "Ren'Py Translator — Pro\n\n"
-            "• Traduce textos (diálogo/narración/menú) en archivos .rpy\n"
-            "• Crea backups .bak antes de traducir\n"
-            "• Restaurar originales cuando quieras\n"
-            "• Guarda tema/idioma/modo endpoint\n",
+        "about_text": "Ren'Py Translator — Pro",
 
         "settings": "Configuración",
         "language": "Idioma de la aplicación",
-        "theme": "Tema",
-        "light": "Claro",
-        "dark": "Oscuro",
         "endpoint_mode": "Servidor de traducción",
         "endpoint_public": "Público (online)",
         "endpoint_local": "Local (localhost)",
         "save": "Guardar",
         "cancel": "Cancelar",
-
-        "restore_done": "Restauración terminada.",
-    
-        "apply_to_original": "Aplicar al juego original",
-    
-        "apply_title": "Aplicar traducción",
-    
-        "apply_confirm": "Esto copiará la traducción generada a la carpeta ORIGINAL del juego (game/tl/<lang>/).\n\n¿Continuar?",
-    
-        "apply_done": "Traducción copiada al juego original.",
-    
-        "apply_error": "No se pudo aplicar la traducción.",
-    
-        "apply_not_packaged": "Este botón es útil cuando preparaste un juego empaquetado (workspace).",
-    
-        "apply_missing_lang": "No hay idioma destino seleccionado.",
-    
-        "apply_nothing_to_apply": "No se encontró tl/<lang>/ en el workspace. Traduce primero.",
-    
-        "act_tutorial": "Tutorial: traducir un juego Ren\'Py…",
-    
-        "tutorial_title": "Tutorial de traducción Ren\'Py",
-    
-        "tutorial_text": ("Paso 1 — Elegir el juego\n""• Pulsa ‘Elegir juego’ y selecciona la carpeta del proyecto (la que contiene game/).\n\n""Paso 2 — Si el juego está EMPAQUETADO\n""• Si no hay .rpy, ve a Herramientas → Preparar juego empaquetado.\n""• Se crea un workspace donde se extraen .rpa y se descompilan scripts (best effort).\n\n""Paso 3 — Analizar\n""• Pulsa Analizar para extraer textos visibles (diálogo, narración, menú, algo de UI).\n\n""Paso 4 — Idiomas\n""• Origen = idioma actual del juego.\n""• Destino = idioma objetivo (ej: French = fr).\n\n""Paso 5 — Endpoint\n""• Público: LibreTranslate online (puede limitar).\n""• Local (avanzado): LibreTranslate con Docker.\n\n""Paso 6 — Traducir\n""• Pulsa Traducir. Se crea game/tl/<lang>/zz_auto_strings.rpy y archivos runtime.\n""• tl/<lang>/ se crea automáticamente si no existe.\n\n""Paso 7 — Aplicar (solo workspace)\n""• Si usaste workspace, pulsa ‘Aplicar al juego original’ para copiar tl/<lang>/ al juego real.\n\n""Paso 8 — Probar\n""• Abre el juego y cambia idioma en Preferencias si existe.\n\n""Consejos\n""• Algunas cadenas UI dinámicas no se capturan.\n""• Haz copia de seguridad del juego antes de modificar."),
     },
 }
 
 
 class SettingsDialog(QDialog):
-    """Qt dialog to edit and persist application settings."""
+    """
+    Settings dialog: we keep ONLY language + endpoint mode.
+    Theme is forced to "dark" (no UI toggle).
+    """
+    # Keep signature (lang, theme, endpoint_mode) for compatibility with MainWindow.on_settings_changed
     settings_changed = Signal(str, str, str)
 
-    def __init__(self, current_lang: str, current_theme: str, current_endpoint_mode: str, parent=None):
+    def __init__(self, current_lang: str, _current_theme: str, current_endpoint_mode: str, parent=None):
         super().__init__(parent)
 
         self.lang = current_lang if current_lang in UI_TEXTS else "en"
-        self.theme = current_theme if current_theme in ("light", "dark") else "light"
+        self.theme = "dark"  # ✅ forced
         self.endpoint_mode = current_endpoint_mode if current_endpoint_mode in ("public", "local") else "public"
 
         t = UI_TEXTS[self.lang]
@@ -373,13 +341,6 @@ class SettingsDialog(QDialog):
         self.lang_combo.setCurrentIndex(self.lang_combo.findData(self.lang))
         layout.addWidget(self.lang_combo)
 
-        layout.addWidget(QLabel(t["theme"]))
-        self.theme_combo = QComboBox()
-        self.theme_combo.addItem(t["light"], "light")
-        self.theme_combo.addItem(t["dark"], "dark")
-        self.theme_combo.setCurrentIndex(self.theme_combo.findData(self.theme))
-        layout.addWidget(self.theme_combo)
-
         layout.addWidget(QLabel(t["endpoint_mode"]))
         self.endpoint_combo = QComboBox()
         self.endpoint_combo.addItem(t["endpoint_public"], "public")
@@ -396,9 +357,10 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.cancel_btn)
 
     def apply_and_close(self):
+        # Emit "dark" theme without requiring any theme_combo widget.
         self.settings_changed.emit(
             self.lang_combo.currentData(),
-            self.theme_combo.currentData(),
+            "dark",
             self.endpoint_combo.currentData(),
         )
         self.accept()
