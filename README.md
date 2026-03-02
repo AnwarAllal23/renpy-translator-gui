@@ -10,18 +10,18 @@ Perfect for developers who want to **translate a Ren'Py game**, localize visual 
 
 ## Features
 
-- ✅ Translate Ren'Py `.rpy` script files automatically  
-- ✅ Supports classic Ren'Py projects  
-- ✅ Supports packaged `.rpa` releases  
-- ✅ Automatic dialogue detection  
-- ✅ Generates proper `game/tl/<lang>/` folders  
-- ✅ Re-apply translation to original game  
-- ✅ Clean and simple GUI (PySide6)  
-- ✅ Fast project scanning  
+-  Translate Ren'Py `.rpy` script files automatically  
+-  Supports classic Ren'Py projects  
+-  Supports packaged `.rpa` releases  
+-  Automatic dialogue detection  
+-  Generates proper `game/tl/<lang>/` folders  
+-  Re-apply translation to original game  
+-  Clean and simple GUI (PySide6)  
+-  Fast project scanning  
 
 ---
 
-## 🛠 How It Works
+## How It Works
 
 1. Select your Ren'Py project folder
 2. The tool scans `.rpy` files
@@ -34,7 +34,7 @@ This follows the official Ren'Py localization workflow.
 
 ---
 
-## 📦 Installation
+## Installation
 
 ```bash
 python -m venv .venv
