@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Iterable, Callable
+import concurrent.futures
+import os
 import re
+import time
 import requests
+
+
+# Providers that need no API key at all (LibreTranslate + Argos).
+NO_KEY_PROVIDERS = ("libretranslate", "argos")
 
 
 @dataclass
@@ -12,6 +19,8 @@ class TranslatorConfig:
     source_lang: str
     target_lang: str
     timeout_s: int = 30
+    provider: str = "libretranslate"  # libretranslate | argos | google | deepl
+    api_key: str = ""
 
 
 class TranslationError(RuntimeError):
@@ -26,10 +35,25 @@ class Translator:
         r"(\\\\n|\\\\\"|\{[^}]*\}|\[[^\]]*\]|%\([^)]+\)[#0\- +]?\d*(?:\.\d+)?[a-zA-Z]|%[sdrof]|%%)"
     )
 
-    def __init__(self, cfg: TranslatorConfig):
+    # DeepL uses a few non-plain-ISO codes for some targets.
+    _DEEPL_TARGET_OVERRIDES = {"en": "EN-US", "pt": "PT-PT"}
+
+    def __init__(self, cfg: TranslatorConfig, on_setup_log: Callable[[str], None] | None = None):
         self.cfg = cfg
         self.cache: dict[str, str] = {}
         self.cancel_requested = False
+        self._on_setup_log = on_setup_log
+        self._argos_ready = False
+        self._argos_workers = 1
+
+        if cfg.provider not in NO_KEY_PROVIDERS and not (cfg.api_key or "").strip():
+            raise TranslationError(
+                f"Missing API key for provider '{cfg.provider}'."
+            )
+
+    def _setup_log(self, msg: str) -> None:
+        if self._on_setup_log:
+            self._on_setup_log(msg)
 
     # ==========================================================
     # PUBLIC
@@ -117,7 +141,17 @@ class Translator:
         return results
 
     def _translate_raw_batch(self, texts: list[str]) -> list[str]:
+        provider = self.cfg.provider
 
+        if provider == "argos":
+            return self._raw_argos(texts)
+        if provider == "google":
+            return self._raw_google(texts)
+        if provider == "deepl":
+            return self._raw_deepl(texts)
+        return self._raw_libretranslate(texts)
+
+    def _raw_libretranslate(self, texts: list[str]) -> list[str]:
         ep = self._normalize_endpoint(self.cfg.endpoint)
 
         payload = {
@@ -154,6 +188,155 @@ class Translator:
                 return [data["translatedText"]]
 
         raise TranslationError("Unexpected API response structure.")
+
+    def _raw_google(self, texts: list[str]) -> list[str]:
+        url = "https://translation.googleapis.com/language/translate/v2"
+        params = {"key": self.cfg.api_key}
+        payload = {
+            "q": texts,
+            "source": self.cfg.source_lang,
+            "target": self.cfg.target_lang,
+            "format": "text",
+        }
+
+        r = requests.post(url, params=params, json=payload, timeout=self.cfg.timeout_s)
+
+        if r.status_code != 200:
+            raise TranslationError(f"Google Translate error {r.status_code}: {r.text[:300]}")
+
+        try:
+            translations = r.json()["data"]["translations"]
+        except (KeyError, ValueError) as e:
+            raise TranslationError(f"Unexpected Google Translate response: {e}")
+
+        return [t.get("translatedText", "") for t in translations]
+
+    def _raw_deepl(self, texts: list[str]) -> list[str]:
+        api_key = self.cfg.api_key.strip()
+        host = "api-free.deepl.com" if api_key.endswith(":fx") else "api.deepl.com"
+        url = f"https://{host}/v2/translate"
+
+        source = self.cfg.source_lang.upper()
+        target = self._DEEPL_TARGET_OVERRIDES.get(self.cfg.target_lang, self.cfg.target_lang.upper())
+
+        headers = {"Authorization": f"DeepL-Auth-Key {api_key}"}
+        data = {"text": texts, "source_lang": source, "target_lang": target}
+
+        r = requests.post(url, headers=headers, data=data, timeout=self.cfg.timeout_s)
+
+        if r.status_code != 200:
+            raise TranslationError(f"DeepL error {r.status_code}: {r.text[:300]}")
+
+        try:
+            translations = r.json()["translations"]
+        except (KeyError, ValueError) as e:
+            raise TranslationError(f"Unexpected DeepL response: {e}")
+
+        return [t.get("text", "") for t in translations]
+
+    def _ensure_argos_package(self) -> None:
+        """Install the offline Argos Translate language pack for this language
+        pair on first use (cached afterwards for the life of this Translator).
+
+        Argos's own docstrings claim missing languages/translations raise an
+        exception, but the actual implementation returns None instead in most
+        cases (only a missing *source* language raises, via AttributeError on
+        None) - so both paths are checked here rather than trusting either
+        docstring.
+        """
+        if self._argos_ready:
+            return
+
+        import argostranslate.package
+        import argostranslate.settings
+        import argostranslate.translate
+
+        self._tune_argos_concurrency(argostranslate.settings)
+
+        from_code, to_code = self.cfg.source_lang, self.cfg.target_lang
+
+        try:
+            translation = argostranslate.translate.get_translation_from_codes(from_code, to_code)
+        except Exception:
+            translation = None
+
+        if translation is None:
+            self._setup_log(f"⬇️ Argos Translate: downloading language pack {from_code} → {to_code}…")
+            argostranslate.package.update_package_index()
+            installed_ok = argostranslate.package.install_package_for_language_pair(from_code, to_code)
+            if not installed_ok:
+                raise TranslationError(
+                    f"Argos Translate has no offline package for {from_code} → {to_code}."
+                )
+            self._setup_log(f"✅ Argos Translate: package {from_code} → {to_code} installed.")
+
+        # The FIRST real translation for a language pair lazily builds things
+        # like the sentence-boundary ("stanza") model - including extracting
+        # files to disk - with no internal locking. Doing that single warm-up
+        # call here, on this thread, before the worker pool exists, means
+        # every concurrent worker later reuses the already-initialized
+        # pipeline instead of racing to extract the same files at once
+        # (which surfaces as a Windows "[WinError 5] Access denied" rename).
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                argostranslate.translate.translate(".", from_code, to_code)
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                time.sleep(0.6)
+
+        if last_error is not None:
+            raise TranslationError(
+                f"Argos Translate failed to initialize for {from_code} → {to_code}: {last_error}"
+            )
+
+        self._argos_ready = True
+
+    def _tune_argos_concurrency(self, argos_settings) -> None:
+        """Argos Translate (CTranslate2) processes one `.translate()` call at a
+        time by default (inter_threads=1), so translating a batch one string
+        after another leaves most CPU cores idle. CTranslate2 translators are
+        thread-safe and designed to serve concurrent requests, so instead we
+        run several single-threaded workers in parallel - one per CPU core -
+        which keeps the whole batch loop from being serialized on one core.
+
+        Skipped entirely if the user already set ARGOS_INTER_THREADS/
+        ARGOS_INTRA_THREADS themselves (env var), to respect their choice.
+        """
+        cpu_count = os.cpu_count() or 4
+
+        if "ARGOS_INTER_THREADS" not in os.environ:
+            argos_settings.inter_threads = max(1, cpu_count)
+        if "ARGOS_INTRA_THREADS" not in os.environ:
+            argos_settings.intra_threads = 1
+
+        self._argos_workers = max(1, int(getattr(argos_settings, "inter_threads", 1)))
+
+    def _raw_argos(self, texts: list[str]) -> list[str]:
+        try:
+            self._ensure_argos_package()
+            import argostranslate.translate
+        except TranslationError:
+            raise
+        except Exception as e:
+            raise TranslationError(f"Argos Translate is unavailable: {e}")
+
+        def do_translate(text: str) -> str:
+            return argostranslate.translate.translate(text, self.cfg.source_lang, self.cfg.target_lang)
+
+        workers = min(len(texts), self._argos_workers)
+        if workers <= 1:
+            return [do_translate(t) for t in texts]
+
+        results: list[str] = [""] * len(texts)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(do_translate, t): i for i, t in enumerate(texts)}
+            for future in concurrent.futures.as_completed(futures):
+                results[futures[future]] = future.result()
+
+        return results
 
     # ==========================================================
     # TOKEN PROTECTION

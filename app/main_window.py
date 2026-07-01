@@ -19,22 +19,25 @@ ADDON (requested):
 from __future__ import annotations
 
 from pathlib import Path
+import html
+import os
 import re
 import requests
 import shutil
 
 from core.tl_writer import write_tl_strings_file, write_runtime_filter_assets
+from core.log_setup import get_logger, get_log_file
 
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFileDialog, QPlainTextEdit,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QPushButton, QLabel, QFileDialog, QPlainTextEdit, QTextEdit,
     QProgressBar, QLineEdit, QMessageBox, QDialog, QComboBox,
     QListWidget, QTableWidget, QTableWidgetItem, QSplitter, QGroupBox,
-    QMenuBar, QToolButton, QSizePolicy,
+    QMenuBar, QToolButton, QSizePolicy, QStackedWidget, QGraphicsDropShadowEffect,
     QTreeWidget, QTreeWidgetItem, QHeaderView, QStyle
 )
-from PySide6.QtCore import QThread, Signal, QObject, QSettings, Qt, QPoint
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import QThread, Signal, QObject, QSettings, Qt, QPoint, QSize
+from PySide6.QtGui import QAction, QIcon, QFont, QColor
 
 from core.project_scanner import (
     detect_renpy_project,
@@ -46,6 +49,11 @@ from core.packaged_tools import prepare_packaged_game as prepare_packaged_game_w
 from core.extractor import extract_strings
 from core.translator import Translator, TranslatorConfig, TranslationError
 from core.rpy_rewriter import rewrite_rpy_file, backup_rpy_file, restore_rpy_file
+from core.docker_manager import (
+    ensure_running as ensure_libretranslate_running,
+    DockerError,
+    is_docker_installed,
+)
 
 from app.settings import SettingsDialog, UI_TEXTS
 from app.theme import qss_dark
@@ -68,6 +76,20 @@ LANGUAGES = {
 }
 
 LANG_CODES = ",".join(LANGUAGES.values())
+
+
+def _is_local_endpoint(endpoint: str) -> bool:
+    e = (endpoint or "").lower()
+    return "localhost" in e or "127.0.0.1" in e
+
+# Translation engines. "libretranslate" covers both Public and Local (Docker) -
+# those two are just different URLs in the endpoint field, not different providers.
+ENGINES = [
+    ("libretranslate", "LibreTranslate (Public / Local)"),
+    ("argos", "Argos Translate (Offline, auto-install)"),
+    ("google", "Google Translate (API key)"),
+    ("deepl", "DeepL (API key)"),
+]
 
 
 # =====================================================
@@ -322,13 +344,16 @@ class TranslateWorker(QObject):
     batch_started = Signal(int, int)   # current_batch, total_batches
     batch_finished = Signal(int, int)  # current_batch, total_batches
 
-    def __init__(self, game_dir: Path, extracted, endpoint: str, src: str, tgt: str):
+    def __init__(self, game_dir: Path, extracted, endpoint: str, src: str, tgt: str,
+                 provider: str = "libretranslate", api_key: str = ""):
         super().__init__()
         self.game_dir = Path(game_dir)
         self.extracted = extracted
         self.endpoint = endpoint
         self.src = src
         self.tgt = tgt
+        self.provider = provider
+        self.api_key = api_key
 
     def run(self):
         try:
@@ -347,13 +372,18 @@ class TranslateWorker(QObject):
             else:
                 self.log.emit("ℹ️ Backups already exist (no new backup created).")
 
+            if self.provider == "libretranslate" and _is_local_endpoint(self.endpoint):
+                ensure_libretranslate_running(self.endpoint, LANG_CODES, log_cb=self.log.emit)
+
             cfg = TranslatorConfig(
                 endpoint=self.endpoint,
                 source_lang=self.src,
                 target_lang=self.tgt,
                 timeout_s=30,
+                provider=self.provider,
+                api_key=self.api_key,
             )
-            translator = Translator(cfg)
+            translator = Translator(cfg, on_setup_log=self.log.emit)
 
             texts = [i.text for i in self.extracted]
             unique = list(dict.fromkeys(texts))
@@ -408,9 +438,11 @@ class TranslateWorker(QObject):
 
             self.finished.emit(1, backups_created)
 
-        except TranslationError as e:
+        except (TranslationError, DockerError) as e:
+            get_logger().exception("Translation failed")
             self.error.emit(str(e))
         except Exception as e:
+            get_logger().exception("Unexpected error during translation")
             self.error.emit(f"Unexpected error: {e}")
 
 
@@ -426,18 +458,37 @@ class TopBar(QWidget):
         self._drag_pos: QPoint | None = None
 
         self.setObjectName("TopBar")
-        self.setFixedHeight(36)
+        self.setFixedHeight(38)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 0, 10, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
-        # Menu bar (left)
+        # Brand (left-most): small app identity so the window is recognizable
+        self.logo_chip = QLabel("🌐")
+        self.logo_chip.setObjectName("LogoChip")
+        self.logo_chip.setFixedSize(22, 22)
+        self.logo_chip.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.logo_chip)
+
+        self.brand_label = QLabel("Ren'Py Translator")
+        self.brand_label.setObjectName("BrandLabel")
+        layout.addWidget(self.brand_label)
+
+        self.pro_badge = QLabel("PRO")
+        self.pro_badge.setObjectName("ProBadge")
+        layout.addWidget(self.pro_badge)
+        layout.addSpacing(8)
+
+        # Menu bar - sized to its content, NOT stretched, so it
+        # doesn't swallow the whole bar and leave no room to drag the window.
         self.menubar = QMenuBar(self)
         self.menubar.setObjectName("TopMenuBar")
         self.menubar.setNativeMenuBar(False)
+        self.menubar.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
 
-        layout.addWidget(self.menubar, 1)
+        layout.addWidget(self.menubar)
+        layout.addStretch(1)  # empty draggable area (mouse events reach TopBar itself)
 
         # Window buttons (right) - 3 dots style
         self.btn_min = QToolButton(self)
@@ -471,6 +522,13 @@ class TopBar(QWidget):
     # ---- Drag handling (move the frameless window) ----
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
+            handle = self._window.windowHandle()
+            if handle is not None and handle.startSystemMove():
+                # Native OS-driven move: smooth, and correctly restores a
+                # maximized window under the cursor (like a normal title bar).
+                e.accept()
+                return
+            # Fallback (older Qt / platforms without native move support)
             self._drag_pos = e.globalPosition().toPoint() - self._window.frameGeometry().topLeft()
             e.accept()
 
@@ -509,6 +567,7 @@ class MainWindow(QMainWindow):
         self.ui_theme = "dark"
         self.endpoint_mode = self.qs.value("net/endpoint_mode", "public")
         self.custom_endpoint = self.qs.value("net/custom_endpoint", DEFAULT_PUBLIC_ENDPOINT)
+        self.engine = self.qs.value("net/engine", "libretranslate")
 
         if self.ui_lang not in UI_TEXTS:
             self.ui_lang = "en"
@@ -516,6 +575,8 @@ class MainWindow(QMainWindow):
             self.ui_theme = "dark"
         if self.endpoint_mode not in ("public", "local"):
             self.endpoint_mode = "public"
+        if self.engine not in {key for key, _ in ENGINES}:
+            self.engine = "libretranslate"
 
         self.setMinimumSize(1050, 650)
         self.resize(1250, 780)
@@ -528,6 +589,7 @@ class MainWindow(QMainWindow):
 
         self.thread: QThread | None = None
         self.worker: TranslateWorker | None = None
+        self._busy = False
 
         # Analysis state for the left tree panel
         self._analysis_ran = False
@@ -539,31 +601,84 @@ class MainWindow(QMainWindow):
         root = QWidget()
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
 
-        # --- Row 1: project picker ---
-        row1 = QHBoxLayout()
+        icon_size = QSize(16, 16)
+
+        # --- Card: Project ---
+        self.project_box = QGroupBox()
+        self.project_box.setObjectName("CardProject")
+        project_layout = QHBoxLayout(self.project_box)
+        project_layout.setSpacing(12)
+
         self.pick_btn = QPushButton()
+        self.pick_btn.setObjectName("btnPrimary")
+        self.pick_btn.setIcon(self._std_icon(QStyle.SP_DirOpenIcon))
+        self.pick_btn.setIconSize(icon_size)
         self.pick_btn.clicked.connect(self.pick_project)
-        self.project_label = QLabel()
-        row1.addWidget(self.pick_btn)
-        row1.addWidget(self.project_label, 1)
-        layout.addLayout(row1)
 
-        # --- Row 2: endpoint + local ---
-        row2 = QHBoxLayout()
+        self.project_label = QLabel()
+        self.project_label.setObjectName("ProjectPathLabel")
+        self.project_label.setWordWrap(True)
+
+        project_layout.addWidget(self.pick_btn)
+        project_layout.addWidget(self.project_label, 1)
+        layout.addWidget(self.project_box)
+
+        # --- Card: Translation settings (engine + endpoint/key + languages) ---
+        self.config_box = QGroupBox()
+        self.config_box.setObjectName("CardConfig")
+        config_grid = QGridLayout(self.config_box)
+        config_grid.setHorizontalSpacing(12)
+        config_grid.setVerticalSpacing(10)
+
+        self.engine_label = QLabel()
+        self.engine_combo = QComboBox()
+        for key, label in ENGINES:
+            self.engine_combo.addItem(label, key)
+        self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
+
+        config_grid.addWidget(self.engine_label, 0, 0)
+        config_grid.addWidget(self.engine_combo, 0, 1, 1, 4)
+
+        # Context row: swaps between LibreTranslate endpoint, an API key field,
+        # or an Argos info hint - only one is relevant per selected engine.
+        self.engine_stack = QStackedWidget()
+
+        endpoint_page = QWidget()
+        endpoint_page_layout = QHBoxLayout(endpoint_page)
+        endpoint_page_layout.setContentsMargins(0, 0, 0, 0)
         self.endpoint_label = QLabel()
         self.endpoint_edit = QLineEdit()
         self.endpoint_edit.editingFinished.connect(self._save_custom_endpoint_if_needed)
         self.local_btn = QPushButton()
+        self.local_btn.setIcon(self._std_icon(QStyle.SP_ComputerIcon))
+        self.local_btn.setIconSize(icon_size)
         self.local_btn.clicked.connect(self.open_local)
+        endpoint_page_layout.addWidget(self.endpoint_label)
+        endpoint_page_layout.addWidget(self.endpoint_edit, 1)
+        endpoint_page_layout.addWidget(self.local_btn)
+        self.engine_stack.addWidget(endpoint_page)  # index 0
 
-        row2.addWidget(self.endpoint_label)
-        row2.addWidget(self.endpoint_edit, 1)
-        row2.addWidget(self.local_btn)
-        layout.addLayout(row2)
+        api_key_page = QWidget()
+        api_key_page_layout = QHBoxLayout(api_key_page)
+        api_key_page_layout.setContentsMargins(0, 0, 0, 0)
+        self.api_key_label = QLabel()
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        self.api_key_edit.editingFinished.connect(self._save_api_key_if_needed)
+        api_key_page_layout.addWidget(self.api_key_label)
+        api_key_page_layout.addWidget(self.api_key_edit, 1)
+        self.engine_stack.addWidget(api_key_page)  # index 1
 
-        # --- Row: languages ---
-        row_lang = QHBoxLayout()
+        self.argos_hint_label = QLabel()
+        self.argos_hint_label.setObjectName("ProjectPathLabel")
+        self.argos_hint_label.setWordWrap(True)
+        self.engine_stack.addWidget(self.argos_hint_label)  # index 2
+
+        config_grid.addWidget(self.engine_stack, 1, 0, 1, 5)
+
         self.src_label = QLabel()
         self.src_combo = QComboBox()
         self.tgt_label = QLabel()
@@ -576,57 +691,100 @@ class MainWindow(QMainWindow):
         self.src_combo.setCurrentText("English")
         self.tgt_combo.setCurrentText("French")
 
-        row_lang.addWidget(self.src_label)
-        row_lang.addWidget(self.src_combo)
-        row_lang.addWidget(self.tgt_label)
-        row_lang.addWidget(self.tgt_combo)
-        layout.addLayout(row_lang)
+        self.lang_arrow_label = QLabel("→")
+        self.lang_arrow_label.setAlignment(Qt.AlignCenter)
+        self.lang_arrow_label.setObjectName("LangArrow")
 
-        # --- Row 3: actions ---
-        row3 = QHBoxLayout()
+        config_grid.addWidget(self.src_label, 2, 0)
+        config_grid.addWidget(self.src_combo, 2, 1)
+        config_grid.addWidget(self.lang_arrow_label, 2, 2)
+        config_grid.addWidget(self.tgt_label, 2, 3)
+        config_grid.addWidget(self.tgt_combo, 2, 4)
+
+        config_grid.setColumnStretch(1, 1)
+        config_grid.setColumnStretch(3, 0)
+        config_grid.setColumnStretch(4, 1)
+
+        layout.addWidget(self.config_box)
+
+        # --- Card: Actions (workflow, left → right) ---
+        self.actions_box = QGroupBox()
+        self.actions_box.setObjectName("CardActions")
+        actions_layout = QHBoxLayout(self.actions_box)
+        actions_layout.setSpacing(10)
+
         self.analyze_btn = QPushButton()
+        self.analyze_btn.setObjectName("btnPrimary")
+        self.analyze_btn.setIcon(self._std_icon(QStyle.SP_FileDialogContentsView))
+        self.analyze_btn.setIconSize(icon_size)
         self.analyze_btn.clicked.connect(self.analyze)
 
         self.translate_btn = QPushButton()
+        self.translate_btn.setObjectName("btnAccent")
+        self.translate_btn.setIcon(self._std_icon(QStyle.SP_MediaPlay))
+        self.translate_btn.setIconSize(icon_size)
         self.translate_btn.clicked.connect(self.start_translation)
         self.translate_btn.setEnabled(False)
 
         self.restore_btn = QPushButton()
+        self.restore_btn.setIcon(self._std_icon(QStyle.SP_DialogResetButton))
+        self.restore_btn.setIconSize(icon_size)
         self.restore_btn.clicked.connect(self.restore_originals)
         self.restore_btn.setEnabled(False)
 
         self.view_changes_btn = QPushButton()
+        self.view_changes_btn.setIcon(self._std_icon(QStyle.SP_FileDialogDetailedView))
+        self.view_changes_btn.setIconSize(icon_size)
         self.view_changes_btn.clicked.connect(self.open_changes_viewer)
         self.view_changes_btn.setEnabled(False)
 
         self.apply_btn = QPushButton()
+        self.apply_btn.setIcon(self._std_icon(QStyle.SP_DialogSaveButton))
+        self.apply_btn.setIconSize(icon_size)
         self.apply_btn.clicked.connect(self.apply_translation_to_original)
         self.apply_btn.setEnabled(False)
 
-        row3.addWidget(self.analyze_btn)
-        row3.addWidget(self.translate_btn)
-        row3.addWidget(self.restore_btn)
-        row3.addWidget(self.view_changes_btn)
-        row3.addWidget(self.apply_btn)
-        layout.addLayout(row3)
+        actions_layout.addWidget(self.analyze_btn)
+        actions_layout.addWidget(self.translate_btn)
+        actions_layout.addWidget(self.restore_btn)
+        actions_layout.addWidget(self.view_changes_btn)
+        actions_layout.addWidget(self.apply_btn)
+
+        actions_layout.addStretch(1)
+
+        self.status_pill = QLabel()
+        self.status_pill.setObjectName("StatusPill")
+        actions_layout.addWidget(self.status_pill)
+
+        layout.addWidget(self.actions_box)
 
         # --- Progress bars ---
+        progress_row = QVBoxLayout()
+        progress_row.setSpacing(4)
+
+        self.progress_caption = QLabel()
+        self.progress_caption.setObjectName("SectionCaption")
+        progress_row.addWidget(self.progress_caption)
+
         self.progress = QProgressBar()
-        layout.addWidget(self.progress)
+        self.progress.setFormat("%p%")
+        progress_row.addWidget(self.progress)
 
         self.batch_progress = QProgressBar()
         self.batch_progress.setRange(0, 1)
         self.batch_progress.setValue(0)
         self.batch_progress.setFormat("Batch: idle")
-        layout.addWidget(self.batch_progress)
+        progress_row.addWidget(self.batch_progress)
+        layout.addLayout(progress_row)
 
         # =========================================================
         # MAIN SPLITTER: LEFT (game tree) | RIGHT (logs)
         # =========================================================
         self.main_splitter = QSplitter(Qt.Horizontal)
 
-        left_box = QGroupBox("game/ explorer")
-        left_layout = QVBoxLayout(left_box)
+        self.left_box = QGroupBox()
+        self.left_box.setObjectName("CardLeft")
+        left_layout = QVBoxLayout(self.left_box)
 
         self.game_tree = QTreeWidget()
         self.game_tree.setColumnCount(3)
@@ -640,26 +798,52 @@ class MainWindow(QMainWindow):
 
         left_layout.addWidget(self.game_tree)
 
-        right_box = QGroupBox("Logs")
-        right_layout = QVBoxLayout(right_box)
-        self.log = QPlainTextEdit()
+        self.right_box = QGroupBox()
+        self.right_box.setObjectName("CardRight")
+        right_layout = QVBoxLayout(self.right_box)
+        self.log = QTextEdit()
+        self.log.setObjectName("LogConsole")
         self.log.setReadOnly(True)
+        self.log.setFont(QFont("Consolas", 9))
         right_layout.addWidget(self.log)
 
-        self.main_splitter.addWidget(left_box)
-        self.main_splitter.addWidget(right_box)
+        self.main_splitter.addWidget(self.left_box)
+        self.main_splitter.addWidget(self.right_box)
         self.main_splitter.setStretchFactor(0, 2)
         self.main_splitter.setStretchFactor(1, 3)
         self.main_splitter.setSizes([420, 830])
 
         layout.addWidget(self.main_splitter, 1)
 
+        # --- card elevation (soft shadows so panels read as "floating") ---
+        for card in (self.project_box, self.config_box, self.actions_box, self.left_box, self.right_box):
+            self._add_card_shadow(card)
+
         # --- final init ---
         self.apply_theme(self.ui_theme)
         self._apply_saved_endpoint_mode()
+        idx = self.engine_combo.findData(self.engine)
+        self.engine_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._on_engine_changed()
         self.retranslate_ui()
         self.clear_log()
         self._refresh_actions_enabled()
+
+    # ---------- visual polish ----------
+    def _add_card_shadow(self, widget: QWidget, blur: int = 28, alpha: int = 150):
+        """Give a card-style widget a soft drop shadow so it reads as an
+        elevated panel over the dark canvas (QSS has no box-shadow)."""
+        effect = QGraphicsDropShadowEffect(widget)
+        effect.setBlurRadius(blur)
+        effect.setOffset(0, 4)
+        effect.setColor(QColor(0, 0, 0, alpha))
+        widget.setGraphicsEffect(effect)
+
+    def _set_status_pill(self, state: str, text: str):
+        self.status_pill.setText(text)
+        self.status_pill.setProperty("state", state)
+        self.status_pill.style().unpolish(self.status_pill)
+        self.status_pill.style().polish(self.status_pill)
 
     # ---------- i18n ----------
     def t(self, key: str) -> str:
@@ -668,11 +852,24 @@ class MainWindow(QMainWindow):
     def retranslate_ui(self):
         self.setWindowTitle(self.t("app_title"))
 
+        self.project_box.setTitle("📁  " + self.t("project_card_title"))
+        self.config_box.setTitle("⚙️  " + self.t("config_card_title"))
+        self.actions_box.setTitle("🚀  " + self.t("actions_card_title"))
+        self.left_box.setTitle("🗂️  " + self.t("left_panel_title"))
+        self.right_box.setTitle("📜  " + self.t("logs_panel_title"))
+
+        self.progress_caption.setText(self.t("progress_caption"))
+        if not self._busy:
+            self._set_status_pill("idle", self.t("status_idle"))
+
         self.pick_btn.setText(self.t("pick_game"))
         self.project_label.setText(str(self.project_root) if self.project_root else self.t("no_project"))
 
+        self.engine_label.setText(self.t("engine_label"))
         self.endpoint_label.setText(self.t("endpoint"))
         self.local_btn.setText(self.t("local"))
+        self.api_key_label.setText(self.t("api_key_label"))
+        self.argos_hint_label.setText(self.t("argos_hint"))
 
         self.src_label.setText(self.t("src_lang"))
         self.tgt_label.setText(self.t("tgt_lang"))
@@ -701,6 +898,7 @@ class MainWindow(QMainWindow):
         self.act_use_public.setText(self.t("act_use_public"))
         self.act_local_guide.setText(self.t("act_local_guide"))
         self.act_tutorial.setText(self.t("act_tutorial"))
+        self.act_open_logs.setText(self.t("act_open_logs"))
         self.act_about.setText(self.t("act_about"))
 
         self.act_prepare_packaged.setText(self.t("prepare_packaged"))
@@ -780,6 +978,12 @@ class MainWindow(QMainWindow):
         self.act_tutorial.triggered.connect(self.show_tutorial)
         self.menu_help.addAction(self.act_tutorial)
 
+        self.menu_help.addSeparator()
+
+        self.act_open_logs = QAction("Open logs folder…", self)
+        self.act_open_logs.triggered.connect(self.open_logs_folder)
+        self.menu_help.addAction(self.act_open_logs)
+
         self.act_about = QAction("About", self)
         self.act_about.triggered.connect(self.show_about)
         self.menu_help.addAction(self.act_about)
@@ -801,12 +1005,47 @@ class MainWindow(QMainWindow):
             self.custom_endpoint = txt
             self.qs.setValue("net/custom_endpoint", txt)
 
+    def _is_local_endpoint(self, endpoint: str) -> bool:
+        return _is_local_endpoint(endpoint)
+
+    def _is_docker_installed(self) -> bool:
+        return is_docker_installed()
+
+    def _warn_docker_missing(self):
+        QMessageBox.warning(self, self.t("docker_missing_title"), self.t("docker_missing_msg"))
+
+    def _on_engine_changed(self, _index: int = 0):
+        engine = self.engine_combo.currentData() or "libretranslate"
+        self.engine = engine
+        self.qs.setValue("net/engine", engine)
+
+        if engine in ("google", "deepl"):
+            self.engine_stack.setCurrentIndex(1)
+            self.api_key_edit.setText(self.qs.value(f"net/api_key_{engine}", ""))
+        elif engine == "argos":
+            self.engine_stack.setCurrentIndex(2)
+        else:
+            self.engine_stack.setCurrentIndex(0)
+
+    def _save_api_key_if_needed(self):
+        engine = self.engine_combo.currentData()
+        if engine in ("google", "deepl"):
+            self.qs.setValue(f"net/api_key_{engine}", self.api_key_edit.text().strip())
+
     # ---------- UI state ----------
     def _set_busy(self, busy: bool):
+        self._busy = busy
+        if busy:
+            self._set_status_pill("busy", self.t("status_busy"))
+        else:
+            self._set_status_pill("idle", self.t("status_idle"))
+
         self.pick_btn.setEnabled(not busy)
         self.analyze_btn.setEnabled(not busy)
         self.local_btn.setEnabled(not busy)
         self.endpoint_edit.setEnabled(not busy)
+        self.engine_combo.setEnabled(not busy)
+        self.api_key_edit.setEnabled(not busy)
         self.src_combo.setEnabled(not busy)
         self.tgt_combo.setEnabled(not busy)
         self.game_tree.setEnabled(not busy)
@@ -988,14 +1227,45 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(str(p))
 
     # ---------- actions ----------
+    def _append_log(self, msg: str):
+        """Append to the on-screen log AND to the persistent log file on disk.
+
+        The on-screen panel is in-memory only (cleared by the user, lost on
+        crash); the file survives both, which matters when diagnosing an
+        error after the fact.
+        """
+        get_logger().info(msg)
+
+        color = "#8b96b3"  # default muted
+        if msg.startswith(("✅", "✔")):
+            color = "#4ade80"
+        elif msg.startswith("❌"):
+            color = "#f87171"
+        elif msg.startswith("⚠️"):
+            color = "#fbbf24"
+        elif msg.startswith(("🌍", "🔎", "ℹ️", "🛟", "⬇️")):
+            color = "#60a5fa"
+        elif msg.startswith("—"):
+            color = "#3a4363"
+
+        self.log.append(f'<span style="color:{color};">{html.escape(msg)}</span>')
+
     def go_home(self):
         self.statusBar().showMessage(self.t("menu_home"))
         self.log.setFocus()
 
     def clear_log(self):
         self.log.clear()
-        self.log.appendPlainText(self.t("ready"))
+        self._append_log(self.t("ready"))
         self.statusBar().showMessage(self.t("log_cleared"))
+
+    def open_logs_folder(self):
+        log_file = get_log_file()
+        get_logger().info("Opening logs folder from menu.")
+        try:
+            os.startfile(log_file.parent)  # noqa: S606 (Windows-only app)
+        except Exception as e:
+            QMessageBox.critical(self, self.t("error"), str(e))
 
     def use_public_endpoint(self):
         self.endpoint_edit.setText(self.custom_endpoint or DEFAULT_PUBLIC_ENDPOINT)
@@ -1024,7 +1294,7 @@ class MainWindow(QMainWindow):
         self._apply_saved_endpoint_mode()
         self.retranslate_ui()
 
-        self.log.appendPlainText("✅ " + self.t("settings_saved"))
+        self._append_log("✅ " + self.t("settings_saved"))
         self.statusBar().showMessage(self.t("settings_saved"))
 
     def pick_project(self):
@@ -1035,6 +1305,7 @@ class MainWindow(QMainWindow):
         try:
             proj = detect_renpy_project(folder)
         except Exception as e:
+            get_logger().exception("Failed to detect Ren'Py project at %s", folder)
             QMessageBox.critical(self, self.t("error"), str(e))
             return
 
@@ -1053,10 +1324,10 @@ class MainWindow(QMainWindow):
             has_rpy = bool(list_game_rpy_files(self.game_dir))
             has_packaged = bool(list_game_archives(self.game_dir) or list_game_compiled_files(self.game_dir))
             if (not has_rpy) and has_packaged:
-                self.log.appendPlainText("ℹ️ " + self.t("prepare_packaged_hint"))
+                self._append_log("ℹ️ " + self.t("prepare_packaged_hint"))
 
         self.retranslate_ui()
-        self.log.appendPlainText("✅ " + self.t("project_selected"))
+        self._append_log("✅ " + self.t("project_selected"))
         self.statusBar().showMessage(self.t("project_selected"))
         self._refresh_actions_enabled()
 
@@ -1068,8 +1339,9 @@ class MainWindow(QMainWindow):
         try:
             result = prepare_packaged_game_workspace(self.original_game_dir)
         except Exception as e:
+            get_logger().exception("Failed to prepare packaged game at %s", self.original_game_dir)
             QMessageBox.critical(self, self.t("prepare_packaged_error"), str(e))
-            self.log.appendPlainText("❌ " + self.t("prepare_packaged_error") + f": {e}")
+            self._append_log("❌ " + self.t("prepare_packaged_error") + f": {e}")
             return
 
         self.workspace_root = result.workspace_root
@@ -1083,8 +1355,8 @@ class MainWindow(QMainWindow):
         self._populate_game_tree()
 
         self.retranslate_ui()
-        self.log.appendPlainText("✅ " + self.t("prepare_packaged_done"))
-        self.log.appendPlainText(f"📁 Workspace: {self.workspace_root}")
+        self._append_log("✅ " + self.t("prepare_packaged_done"))
+        self._append_log(f"📁 Workspace: {self.workspace_root}")
         self.statusBar().showMessage(self.t("prepare_packaged_done"))
         self._refresh_actions_enabled()
 
@@ -1111,14 +1383,14 @@ class MainWindow(QMainWindow):
         self._file_dialogue_counts = counts
         self._update_tree_status_after_analysis(counts)
 
-        self.log.appendPlainText("✅ Project loaded.")
-        self.log.appendPlainText(
+        self._append_log("✅ Project loaded.")
+        self._append_log(
             f"📄 Files: .rpy/.rpym={result.total_files} | "
             f".rpyc/.rpymc/.rpyb={len(list_game_compiled_files(self.game_dir))} | "
             f".rpa={len(list_game_archives(self.game_dir))}"
         )
-        self.log.appendPlainText(f"🧩 Extracted strings (dialogue/narration/menu/ui): {len(self.extracted)}")
-        self.log.appendPlainText("📌 Left panel updated: status icons + dialogue count per script.")
+        self._append_log(f"🧩 Extracted strings (dialogue/narration/menu/ui): {len(self.extracted)}")
+        self._append_log("📌 Left panel updated: status icons + dialogue count per script.")
 
         self.statusBar().showMessage(self.t("analysis_done"))
         self._refresh_actions_enabled()
@@ -1137,26 +1409,37 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, self.t("invalid_languages_title"), self.t("invalid_languages_msg"))
             return
 
+        engine = self.engine_combo.currentData() or "libretranslate"
         endpoint = self.endpoint_edit.text().strip()
-        if not endpoint:
+        api_key = self.api_key_edit.text().strip()
+
+        if engine == "libretranslate" and not endpoint:
             QMessageBox.warning(self, self.t("missing_endpoint_title"), self.t("missing_endpoint_msg"))
+            return
+        if engine in ("google", "deepl") and not api_key:
+            QMessageBox.warning(self, self.t("missing_api_key_title"), self.t("missing_api_key_msg"))
+            return
+        if engine == "libretranslate" and self._is_local_endpoint(endpoint) and not self._is_docker_installed():
+            self._warn_docker_missing()
             return
 
         self._save_custom_endpoint_if_needed()
+        self._save_api_key_if_needed()
 
         self.progress.setValue(0)
         self._reset_batch_progress()
-        self.log.appendPlainText("—" * 45)
+        self._append_log("—" * 45)
         self.statusBar().showMessage(self.t("translating"))
         self._set_busy(True)
 
         self.thread = QThread()
-        self.worker = TranslateWorker(self.game_dir, self.extracted, endpoint, src, tgt)
+        self.worker = TranslateWorker(self.game_dir, self.extracted, endpoint, src, tgt,
+                                       provider=engine, api_key=api_key)
         self.worker.moveToThread(self.thread)
 
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.progress.setValue)
-        self.worker.log.connect(self.log.appendPlainText)
+        self.worker.log.connect(self._append_log)
 
         self.worker.batch_started.connect(self._on_batch_started)
         self.worker.batch_finished.connect(self._on_batch_finished)
@@ -1173,6 +1456,7 @@ class MainWindow(QMainWindow):
             self.thread.wait(3000)
 
         self._set_busy(False)
+        self._set_status_pill("success", self.t("status_success"))
         self._reset_batch_progress()
         self.statusBar().showMessage(self.t("translation_finished"))
         self._refresh_actions_enabled()
@@ -1190,9 +1474,14 @@ class MainWindow(QMainWindow):
             self.thread.wait(3000)
 
         self._set_busy(False)
+        self._set_status_pill("error", self.t("status_error"))
         self._reset_batch_progress()
         self.statusBar().showMessage(self.t("error"))
-        QMessageBox.critical(self, self.t("error"), msg)
+        self._append_log("❌ " + msg)
+        QMessageBox.critical(
+            self, self.t("error"),
+            msg + f"\n\n📄 {self.t('log_file_hint')}: {get_log_file()}"
+        )
 
     def show_tutorial(self):
         QMessageBox.information(self, self.t("tutorial_title"), self.t("tutorial_text"))
@@ -1235,11 +1524,12 @@ class MainWindow(QMainWindow):
                 out.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(p, out)
 
-            self.log.appendPlainText("✅ " + self.t("apply_done") + f" ({lang})")
-            self.log.appendPlainText(f"📌 {dst_dir}")
+            self._append_log("✅ " + self.t("apply_done") + f" ({lang})")
+            self._append_log(f"📌 {dst_dir}")
             QMessageBox.information(self, self.t("apply_title"), self.t("apply_done"))
         except Exception as e:
-            self.log.appendPlainText("❌ " + self.t("apply_error") + f": {e}")
+            get_logger().exception("Failed to apply translation to original game dir")
+            self._append_log("❌ " + self.t("apply_error") + f": {e}")
             QMessageBox.critical(self, self.t("apply_title"), self.t("apply_error") + f"\n\n{e}")
 
     def restore_originals(self):
@@ -1267,11 +1557,14 @@ class MainWindow(QMainWindow):
                 missing += 1
 
         self.progress.setValue(0)
-        self.log.appendPlainText("—" * 45)
-        self.log.appendPlainText(f"🛟 Restored: {restored}. Missing backups: {missing}.")
+        self._append_log("—" * 45)
+        self._append_log(f"🛟 Restored: {restored}. Missing backups: {missing}.")
         self.statusBar().showMessage(self.t("restore_finished"))
 
     def open_local(self):
+        if not self._is_docker_installed():
+            self._warn_docker_missing()
+
         dlg = LocalTranslateDialog(self)
         if dlg.exec():
             self.endpoint_edit.setText(LOCAL_ENDPOINT)

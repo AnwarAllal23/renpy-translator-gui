@@ -34,10 +34,27 @@ UI_TEXTS = {
         "error": "Error.",
 
         # Main UI
+        "project_card_title": "Project",
+        "config_card_title": "Translation settings",
+        "actions_card_title": "Actions",
+        "left_panel_title": "Game files",
+        "logs_panel_title": "Logs",
+
+        "status_idle": "Idle",
+        "status_busy": "Working…",
+        "status_success": "Success",
+        "status_error": "Error",
+        "progress_caption": "OVERALL PROGRESS",
+
         "pick_game": "Choose game",
         "no_project": "No project selected.",
+        "engine_label": "Translation engine:",
         "endpoint": "Endpoint:",
         "local": "Local (advanced)",
+        "api_key_label": "API key:",
+        "argos_hint": "Offline translation - no account, no server. The language pack downloads automatically on first use (roughly 50-200 MB per language pair).",
+        "missing_api_key_title": "Missing API key",
+        "missing_api_key_msg": "Please enter an API key for the selected translation engine.",
         "src_lang": "Source language:",
         "tgt_lang": "Target language:",
         "analyze": "Analyze",
@@ -64,6 +81,16 @@ UI_TEXTS = {
         "invalid_languages_msg": "Source and target languages must be different.",
         "missing_endpoint_title": "Missing endpoint",
         "missing_endpoint_msg": "Please enter a translation endpoint.",
+        "docker_missing_title": "Docker not found",
+        "docker_missing_msg": (
+            "Local translation runs LibreTranslate inside a Docker container on your own machine, "
+            "so it needs Docker to be installed - and it doesn't look like it is (no 'docker' command found).\n\n"
+            "To use Local mode:\n"
+            "1) Install Docker Desktop: https://www.docker.com/products/docker-desktop/\n"
+            "2) Start it, then run the command from the Local setup guide.\n\n"
+            "Prefer not to install anything? Switch the translation engine to 'Argos Translate' instead - "
+            "it also runs fully offline, but needs no Docker and no account."
+        ),
 
         # Menus
         "menu_home": "Home",
@@ -114,6 +141,9 @@ UI_TEXTS = {
         "apply_missing_lang": "No target language selected.",
         "apply_nothing_to_apply": "No tl/<lang>/ folder found in the workspace. Translate first.",
 
+        "act_open_logs": "Open logs folder…",
+        "log_file_hint": "Full log",
+
         "act_tutorial": "How to translate a Ren'Py game…",
         "tutorial_title": "Ren'Py translation tutorial",
         "tutorial_text": (
@@ -156,10 +186,27 @@ UI_TEXTS = {
         "restore_finished": "Restauration terminée.",
         "error": "Erreur.",
 
+        "project_card_title": "Projet",
+        "config_card_title": "Paramètres de traduction",
+        "actions_card_title": "Actions",
+        "left_panel_title": "Fichiers du jeu",
+        "logs_panel_title": "Journal",
+
+        "status_idle": "En attente",
+        "status_busy": "En cours…",
+        "status_success": "Terminé",
+        "status_error": "Erreur",
+        "progress_caption": "PROGRESSION GLOBALE",
+
         "pick_game": "Choisir un jeu",
         "no_project": "Aucun projet sélectionné.",
+        "engine_label": "Moteur de traduction :",
         "endpoint": "Endpoint :",
         "local": "Local (avancé)",
+        "api_key_label": "Clé API :",
+        "argos_hint": "Traduction hors-ligne - aucun compte, aucun serveur. Le pack de langue se télécharge automatiquement au premier usage (environ 50-200 Mo par paire de langues).",
+        "missing_api_key_title": "Clé API manquante",
+        "missing_api_key_msg": "Entre une clé API pour le moteur de traduction sélectionné.",
         "src_lang": "Langue source :",
         "tgt_lang": "Langue cible :",
         "analyze": "Analyser",
@@ -184,6 +231,16 @@ UI_TEXTS = {
         "invalid_languages_msg": "La langue source et la langue cible doivent être différentes.",
         "missing_endpoint_title": "Endpoint manquant",
         "missing_endpoint_msg": "Entre un endpoint de traduction.",
+        "docker_missing_title": "Docker introuvable",
+        "docker_missing_msg": (
+            "La traduction locale fait tourner LibreTranslate dans un conteneur Docker sur ta machine, "
+            "il faut donc que Docker soit installé - et ça n'a pas l'air d'être le cas (commande 'docker' introuvable).\n\n"
+            "Pour utiliser le mode Local :\n"
+            "1) Installe Docker Desktop : https://www.docker.com/products/docker-desktop/\n"
+            "2) Démarre-le, puis lance la commande du guide de configuration locale.\n\n"
+            "Tu préfères ne rien installer ? Passe le moteur de traduction sur 'Argos Translate' à la place - "
+            "il tourne aussi 100% hors-ligne, mais sans Docker ni compte."
+        ),
 
         "menu_home": "Accueil",
         "menu_project": "Projet",
@@ -228,6 +285,9 @@ UI_TEXTS = {
         "apply_not_packaged": "Ce bouton sert surtout quand tu as préparé un jeu packagé (workspace).",
         "apply_missing_lang": "Aucune langue cible sélectionnée.",
         "apply_nothing_to_apply": "Aucun dossier tl/<lang>/ trouvé dans le workspace. Traduis d'abord.",
+
+        "act_open_logs": "Ouvrir le dossier des logs…",
+        "log_file_hint": "Journal complet",
 
         "act_tutorial": "Tutoriel : traduire un jeu Ren'Py…",
         "tutorial_title": "Tutoriel de traduction Ren'Py",
@@ -349,6 +409,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.endpoint_combo)
 
         self.save_btn = QPushButton(t["save"])
+        self.save_btn.setObjectName("btnPrimary")
         self.save_btn.clicked.connect(self.apply_and_close)
         layout.addWidget(self.save_btn)
 
