@@ -371,6 +371,12 @@ def qss_dark() -> str:
         border-top: 1px solid {border_soft};
     }}
 
+    QLabel#VersionLabel {{
+        color: {text_muted};
+        font-weight: 700;
+        padding: 0 10px;
+    }}
+
     /* -------- Progress -------- */
     QProgressBar {{
         background: {bg_lighter};

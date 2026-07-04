@@ -57,6 +57,7 @@ from core.docker_manager import (
 
 from app.settings import SettingsDialog, UI_TEXTS
 from app.theme import qss_dark
+from app.version import APP_DISPLAY_VERSION, APP_VERSION
 
 
 DEFAULT_PUBLIC_ENDPOINT = "https://libretranslate.de/translate"
@@ -552,7 +553,7 @@ class TopBar(QWidget):
 # =====================================================
 class MainWindow(QMainWindow):
     """Main application window: orchestrates scan → translate → write."""
-    def __init__(self):
+    def __init__(self, initial_project: Path | None = None):
         super().__init__()
 
         # Frameless window (remove native Windows title bar)
@@ -827,6 +828,12 @@ class MainWindow(QMainWindow):
         self._on_engine_changed()
         self.retranslate_ui()
         self.clear_log()
+        self.version_label = QLabel(f"v{APP_VERSION}")
+        self.version_label.setObjectName("VersionLabel")
+        self.statusBar().addPermanentWidget(self.version_label)
+        self.statusBar().showMessage(self.t("ready"))
+        if initial_project is not None:
+            self._load_project(initial_project)
         self._refresh_actions_enabled()
 
     # ---------- visual polish ----------
@@ -850,7 +857,7 @@ class MainWindow(QMainWindow):
         return UI_TEXTS.get(self.ui_lang, UI_TEXTS["en"]).get(key, UI_TEXTS["en"].get(key, key))
 
     def retranslate_ui(self):
-        self.setWindowTitle(self.t("app_title"))
+        self.setWindowTitle(f"{self.t('app_title')} - v{APP_VERSION}")
 
         self.project_box.setTitle("📁  " + self.t("project_card_title"))
         self.config_box.setTitle("⚙️  " + self.t("config_card_title"))
@@ -1274,7 +1281,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(self.t("act_use_public"))
 
     def show_about(self):
-        QMessageBox.information(self, self.t("about_title"), self.t("about_text"))
+        QMessageBox.information(
+            self,
+            self.t("about_title"),
+            f"{APP_DISPLAY_VERSION}\n\n{self.t('about_text')}",
+        )
 
     def open_settings(self):
         dlg = SettingsDialog(self.ui_lang, self.ui_theme, self.endpoint_mode, self)
@@ -1302,6 +1313,10 @@ class MainWindow(QMainWindow):
         if not folder:
             return
 
+        self._load_project(Path(folder))
+
+    def _load_project(self, folder: Path):
+        """Load a Ren'Py project and refresh all project-dependent UI state."""
         try:
             proj = detect_renpy_project(folder)
         except Exception as e:

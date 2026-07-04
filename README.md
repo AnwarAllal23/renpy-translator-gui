@@ -5,6 +5,7 @@ A free, open-source desktop app that translates **Ren'Py** visual novels — dia
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![PySide6](https://img.shields.io/badge/PySide6-6.6%2B-41CD52?logo=qt&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
+![Version](https://img.shields.io/badge/Version-0.3.0-0EA5E9)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 ![Ren'Py Translator main window](docs/screenshot.png)
@@ -48,6 +49,8 @@ The latest update is a substantial rework of the app, on top of the original sca
 - **More reliable Ren'Py-safety** — improved protection for text tags (`{i}...{/i}`), interpolations (`[player_name]`), and `%`-style formatting so translated builds are less likely to crash.
 - **Persistent crash-safe logging** — every session is now logged to a rotating file on disk (`Help → Open logs folder…`), independent of the in-app log panel, so a crash or restart doesn't erase the trail you'd need to debug it.
 - **Full interface translation** — the app itself now runs in **English, French, or Spanish** (`Settings → Preferences…`), not just the games it translates.
+- **Startup loading screen + visible version** — the app now shows a splash/loading screen before the main window appears, and the current version is visible in the bottom-right status bar.
+- **Professional code documentation** — maintainers can now use [`docs/CODE_DOCUMENTATION.md`](docs/CODE_DOCUMENTATION.md) for a complete architecture and module guide.
 
 ## Download
 
