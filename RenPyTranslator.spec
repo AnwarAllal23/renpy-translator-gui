@@ -5,7 +5,7 @@ a = Analysis(
     ['entrypoint.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('app/assets', 'app/assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

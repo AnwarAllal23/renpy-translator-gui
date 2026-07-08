@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from pathlib import Path
 import html
-import os
 import re
 import requests
 import shutil
@@ -36,8 +35,8 @@ from PySide6.QtWidgets import (
     QMenuBar, QToolButton, QSizePolicy, QStackedWidget, QGraphicsDropShadowEffect,
     QTreeWidget, QTreeWidgetItem, QHeaderView, QStyle
 )
-from PySide6.QtCore import QThread, Signal, QObject, QSettings, Qt, QPoint, QSize
-from PySide6.QtGui import QAction, QIcon, QFont, QColor
+from PySide6.QtCore import QThread, Signal, QObject, QSettings, Qt, QPoint, QSize, QEvent, QUrl, QRect
+from PySide6.QtGui import QAction, QIcon, QFont, QColor, QCursor, QDesktopServices
 
 from core.project_scanner import (
     detect_renpy_project,
@@ -210,8 +209,21 @@ class ChangesViewerDialog(QDialog):
         ])
         self.table.setWordWrap(True)
         self.table.setAlternatingRowColors(True)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        right_layout.addWidget(self.table)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+
+        self.empty_label = QLabel(self.t("changes_none"))
+        self.empty_label.setObjectName("EmptyState")
+        self.empty_label.setAlignment(Qt.AlignCenter)
+        self.empty_label.setWordWrap(True)
+
+        # One page per state: the diff table, or a friendly empty-state hint
+        # (no modal popup before the dialog even shows up).
+        self.right_stack = QStackedWidget()
+        self.right_stack.addWidget(self.table)        # index 0
+        self.right_stack.addWidget(self.empty_label)  # index 1
+        right_layout.addWidget(self.right_stack)
 
         splitter.addWidget(left_box)
         splitter.addWidget(right_box)
@@ -228,12 +240,11 @@ class ChangesViewerDialog(QDialog):
         layout.addLayout(btn_row)
 
         self.modified_files = _detect_modified_files(self.game_dir)
-        if not self.modified_files:
-            QMessageBox.information(self, self.t("changes_title"), self.t("changes_none"))
-        else:
-            for f in self.modified_files:
-                rel = str(f.relative_to(self.game_dir)).replace("\\", "/")
-                self.file_list.addItem(rel)
+        self.right_stack.setCurrentIndex(0 if self.modified_files else 1)
+
+        for f in self.modified_files:
+            rel = str(f.relative_to(self.game_dir)).replace("\\", "/")
+            self.file_list.addItem(rel)
 
         self.file_list.currentRowChanged.connect(self.on_file_selected)
 
@@ -254,7 +265,6 @@ class ChangesViewerDialog(QDialog):
             self.table.setItem(r, 1, QTableWidgetItem(orig))
             self.table.setItem(r, 2, QTableWidgetItem(trans))
 
-        self.table.resizeColumnsToContents()
         self.table.resizeRowsToContents()
 
 
@@ -263,25 +273,17 @@ class ChangesViewerDialog(QDialog):
 # =====================================================
 class LocalTranslateDialog(QDialog):
     """Dialog to configure a local translation endpoint."""
-    def __init__(self, parent=None):
+    def __init__(self, t_func, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Local translation (advanced)")
+        self.t = t_func
+
+        self.setWindowTitle(self.t("local_title"))
         self.setMinimumWidth(720)
 
         layout = QVBoxLayout(self)
 
-        info = QLabel(
-            "<b>Local translation mode (LibreTranslate)</b><br><br>"
-            "This mode uses a <b>local</b> translation server (on your PC).<br>"
-            "✅ No limits<br>"
-            "✅ Often faster<br>"
-            "❌ Requires Docker Desktop<br><br>"
-            "<b>Languages supported by this app:</b><br>"
-            + ", ".join(f"{name} ({code})" for name, code in LANGUAGES.items()) +
-            "<br><br>"
-            "<b>IMPORTANT:</b> every language you use must be loaded in LibreTranslate.<br><br>"
-            "<b>Recommended Docker command (copy/paste):</b>"
-        )
+        languages = ", ".join(f"{name} ({code})" for name, code in LANGUAGES.items())
+        info = QLabel(self.t("local_intro_html").format(languages=languages))
         info.setWordWrap(True)
         layout.addWidget(info)
 
@@ -294,12 +296,12 @@ class LocalTranslateDialog(QDialog):
         )
         layout.addWidget(command)
 
-        self.status = QLabel("🔎 Status: not tested")
+        self.status = QLabel(self.t("local_status_untested"))
         layout.addWidget(self.status)
 
         row = QHBoxLayout()
-        self.test_btn = QPushButton("Test connection")
-        self.use_btn = QPushButton("Use localhost")
+        self.test_btn = QPushButton(self.t("local_test"))
+        self.use_btn = QPushButton(self.t("local_use"))
         self.use_btn.setEnabled(False)
 
         self.test_btn.clicked.connect(self.test)
@@ -319,15 +321,12 @@ class LocalTranslateDialog(QDialog):
             )
             r.raise_for_status()
             if r.json().get("translatedText"):
-                self.status.setText("✅ Local server OK")
+                self.status.setText(self.t("local_status_ok"))
                 self.use_btn.setEnabled(True)
             else:
                 raise RuntimeError("No translatedText in response")
         except Exception:
-            self.status.setText(
-                "❌ Local server not reachable.\n"
-                "Make sure Docker Desktop is running and you executed the command above."
-            )
+            self.status.setText(self.t("local_status_fail"))
 
 
 # =====================================================
@@ -447,6 +446,138 @@ class TranslateWorker(QObject):
 
 
 # =====================================================
+# Frameless window edge-resize support
+# =====================================================
+class FramelessResizeFilter(QObject):
+    """Application-level event filter that restores edge-resizing on a
+    frameless window (Qt.FramelessWindowHint removes the native resize
+    borders, so without this the window could only be maximized).
+
+    Any mouse press within MARGIN px of the window border starts a native
+    system resize; mouse moves over that band show the matching resize
+    cursor (on widgets that deliver hover moves).
+    """
+
+    MARGIN = 8
+
+    def __init__(self, window: QMainWindow):
+        super().__init__(window)
+        self._window = window
+        self._cursor_overridden = False
+        # Manual-drag state, used when the platform doesn't implement
+        # QWindow.startSystemResize (e.g. macOS).
+        self._active_edges = Qt.Edge(0)
+        self._press_pos = QPoint()
+        self._start_geo = QRect()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
+    def _edges_at(self, global_pos: QPoint) -> Qt.Edge:
+        if self._window.isMaximized() or self._window.isFullScreen():
+            return Qt.Edge(0)
+        geo = self._window.frameGeometry()
+        if not geo.contains(global_pos):
+            return Qt.Edge(0)
+        edges = Qt.Edge(0)
+        m = self.MARGIN
+        if global_pos.x() <= geo.left() + m:
+            edges |= Qt.LeftEdge
+        if global_pos.x() >= geo.right() - m:
+            edges |= Qt.RightEdge
+        if global_pos.y() <= geo.top() + m:
+            edges |= Qt.TopEdge
+        if global_pos.y() >= geo.bottom() - m:
+            edges |= Qt.BottomEdge
+        return edges
+
+    def _update_cursor(self, edges: Qt.Edge) -> None:
+        shape = None
+        if edges in (Qt.LeftEdge | Qt.TopEdge, Qt.RightEdge | Qt.BottomEdge):
+            shape = Qt.SizeFDiagCursor
+        elif edges in (Qt.RightEdge | Qt.TopEdge, Qt.LeftEdge | Qt.BottomEdge):
+            shape = Qt.SizeBDiagCursor
+        elif edges & (Qt.LeftEdge | Qt.RightEdge):
+            shape = Qt.SizeHorCursor
+        elif edges & (Qt.TopEdge | Qt.BottomEdge):
+            shape = Qt.SizeVerCursor
+
+        if shape is not None:
+            if self._cursor_overridden:
+                QApplication.changeOverrideCursor(QCursor(shape))
+            else:
+                QApplication.setOverrideCursor(QCursor(shape))
+                self._cursor_overridden = True
+        else:
+            self._restore_cursor()
+
+    def _restore_cursor(self) -> None:
+        if self._cursor_overridden:
+            QApplication.restoreOverrideCursor()
+            self._cursor_overridden = False
+
+    def _apply_manual_resize(self, global_pos: QPoint) -> None:
+        geo = QRect(self._start_geo)
+        delta = global_pos - self._press_pos
+        min_w = self._window.minimumWidth()
+        min_h = self._window.minimumHeight()
+
+        if self._active_edges & Qt.LeftEdge:
+            geo.setLeft(min(geo.left() + delta.x(), geo.right() - min_w + 1))
+        if self._active_edges & Qt.RightEdge:
+            geo.setRight(max(geo.right() + delta.x(), geo.left() + min_w - 1))
+        if self._active_edges & Qt.TopEdge:
+            geo.setTop(min(geo.top() + delta.y(), geo.bottom() - min_h + 1))
+        if self._active_edges & Qt.BottomEdge:
+            geo.setBottom(max(geo.bottom() + delta.y(), geo.top() + min_h - 1))
+
+        self._window.setGeometry(geo)
+
+    def eventFilter(self, obj, ev):
+        etype = ev.type()
+
+        if etype == QEvent.Leave and isinstance(obj, QWidget) and obj.window() is self._window:
+            if not self._active_edges and not self._edges_at(QCursor.pos()):
+                self._restore_cursor()
+            return False
+
+        if etype not in (QEvent.MouseMove, QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
+            return False
+        if not isinstance(obj, QWidget) or obj.window() is not self._window:
+            return False
+
+        global_pos = ev.globalPosition().toPoint()
+
+        if etype == QEvent.MouseMove:
+            if self._active_edges:
+                self._apply_manual_resize(global_pos)
+                return True
+            if not ev.buttons():
+                self._update_cursor(self._edges_at(global_pos))
+            return False
+
+        if etype == QEvent.MouseButtonRelease:
+            if self._active_edges:
+                self._active_edges = Qt.Edge(0)
+                return True
+            return False
+
+        # MouseButtonPress
+        edges = self._edges_at(global_pos)
+        if ev.button() == Qt.LeftButton and edges:
+            handle = self._window.windowHandle()
+            if handle is not None and handle.startSystemResize(edges):
+                self._restore_cursor()
+                return True
+            # Fallback: drive the resize ourselves (keeps the resize cursor).
+            self._active_edges = edges
+            self._press_pos = global_pos
+            self._start_geo = self._window.geometry()
+            return True
+        return False
+
+
+# =====================================================
 # Top Bar (Menu + Window Controls)
 # =====================================================
 class TopBar(QWidget):
@@ -558,8 +689,14 @@ class MainWindow(QMainWindow):
         # Frameless window (remove native Windows title bar)
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
 
+        # Frameless windows lose the native resize borders; this filter
+        # restores edge-resizing (drag any window border).
+        self._resize_filter = FramelessResizeFilter(self)
+        self.setMouseTracking(True)
+
         # Custom top bar: menu (left) + window buttons (right)
         self.top_bar = TopBar(self)
+        self.top_bar.setMouseTracking(True)
         self.setMenuWidget(self.top_bar)
 
         self.qs = QSettings("RenPyTranslator", "RenPyTranslatorPro")
@@ -580,6 +717,9 @@ class MainWindow(QMainWindow):
 
         self.setMinimumSize(1050, 650)
         self.resize(1250, 780)
+        saved_geometry = self.qs.value("ui/geometry")
+        if saved_geometry is not None:
+            self.restoreGeometry(saved_geometry)
 
         self.project_root: Path | None = None
         self.game_dir: Path | None = None
@@ -599,6 +739,7 @@ class MainWindow(QMainWindow):
         self._build_menu()
 
         root = QWidget()
+        root.setMouseTracking(True)  # resize-cursor feedback along the window edges
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
         layout.setContentsMargins(14, 12, 14, 12)
@@ -647,10 +788,12 @@ class MainWindow(QMainWindow):
         self.engine_stack = QStackedWidget()
 
         endpoint_page = QWidget()
+        endpoint_page.setObjectName("EnginePage")
         endpoint_page_layout = QHBoxLayout(endpoint_page)
         endpoint_page_layout.setContentsMargins(0, 0, 0, 0)
         self.endpoint_label = QLabel()
         self.endpoint_edit = QLineEdit()
+        self.endpoint_edit.setPlaceholderText(DEFAULT_PUBLIC_ENDPOINT)
         self.endpoint_edit.editingFinished.connect(self._save_custom_endpoint_if_needed)
         self.local_btn = QPushButton()
         self.local_btn.setIcon(self._std_icon(QStyle.SP_ComputerIcon))
@@ -662,6 +805,7 @@ class MainWindow(QMainWindow):
         self.engine_stack.addWidget(endpoint_page)  # index 0
 
         api_key_page = QWidget()
+        api_key_page.setObjectName("EnginePage")
         api_key_page_layout = QHBoxLayout(api_key_page)
         api_key_page_layout.setContentsMargins(0, 0, 0, 0)
         self.api_key_label = QLabel()
@@ -691,13 +835,15 @@ class MainWindow(QMainWindow):
         self.src_combo.setCurrentText("English")
         self.tgt_combo.setCurrentText("French")
 
-        self.lang_arrow_label = QLabel("→")
-        self.lang_arrow_label.setAlignment(Qt.AlignCenter)
-        self.lang_arrow_label.setObjectName("LangArrow")
+        self.swap_langs_btn = QToolButton()
+        self.swap_langs_btn.setObjectName("SwapLang")
+        self.swap_langs_btn.setText("⇄")
+        self.swap_langs_btn.setCursor(Qt.PointingHandCursor)
+        self.swap_langs_btn.clicked.connect(self.swap_languages)
 
         config_grid.addWidget(self.src_label, 2, 0)
         config_grid.addWidget(self.src_combo, 2, 1)
-        config_grid.addWidget(self.lang_arrow_label, 2, 2)
+        config_grid.addWidget(self.swap_langs_btn, 2, 2, Qt.AlignCenter)
         config_grid.addWidget(self.tgt_label, 2, 3)
         config_grid.addWidget(self.tgt_combo, 2, 4)
 
@@ -758,24 +904,28 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.actions_box)
 
-        # --- Progress bars ---
-        progress_row = QVBoxLayout()
-        progress_row.setSpacing(4)
+        # --- Progress bars (overall + batch, side by side) ---
+        progress_area = QVBoxLayout()
+        progress_area.setSpacing(4)
 
         self.progress_caption = QLabel()
         self.progress_caption.setObjectName("SectionCaption")
-        progress_row.addWidget(self.progress_caption)
+        progress_area.addWidget(self.progress_caption)
+
+        bars_row = QHBoxLayout()
+        bars_row.setSpacing(8)
 
         self.progress = QProgressBar()
         self.progress.setFormat("%p%")
-        progress_row.addWidget(self.progress)
+        bars_row.addWidget(self.progress, 3)
 
         self.batch_progress = QProgressBar()
         self.batch_progress.setRange(0, 1)
         self.batch_progress.setValue(0)
-        self.batch_progress.setFormat("Batch: idle")
-        progress_row.addWidget(self.batch_progress)
-        layout.addLayout(progress_row)
+        bars_row.addWidget(self.batch_progress, 1)
+
+        progress_area.addLayout(bars_row)
+        layout.addLayout(progress_area)
 
         # =========================================================
         # MAIN SPLITTER: LEFT (game tree) | RIGHT (logs)
@@ -792,11 +942,21 @@ class MainWindow(QMainWindow):
         self.game_tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.game_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.game_tree.header().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.game_tree.header().setStretchLastSection(False)
         self.game_tree.setUniformRowHeights(True)
-        self.game_tree.setIndentation(18)
+        self.game_tree.setIndentation(14)
         self.game_tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
 
-        left_layout.addWidget(self.game_tree)
+        self.tree_empty_label = QLabel()
+        self.tree_empty_label.setObjectName("EmptyState")
+        self.tree_empty_label.setAlignment(Qt.AlignCenter)
+        self.tree_empty_label.setWordWrap(True)
+
+        # Empty-state hint until a project is picked, then the file tree.
+        self.left_stack = QStackedWidget()
+        self.left_stack.addWidget(self.tree_empty_label)  # index 0
+        self.left_stack.addWidget(self.game_tree)         # index 1
+        left_layout.addWidget(self.left_stack)
 
         self.right_box = QGroupBox()
         self.right_box.setObjectName("CardRight")
@@ -820,6 +980,10 @@ class MainWindow(QMainWindow):
             self._add_card_shadow(card)
 
         # --- final init ---
+        status_bar = self.statusBar()
+        status_bar.setSizeGripEnabled(True)
+        status_bar.setMouseTracking(True)
+
         self.apply_theme(self.ui_theme)
         self._apply_saved_endpoint_mode()
         idx = self.engine_combo.findData(self.engine)
@@ -828,6 +992,10 @@ class MainWindow(QMainWindow):
         self.retranslate_ui()
         self.clear_log()
         self._refresh_actions_enabled()
+
+    def closeEvent(self, event):
+        self.qs.setValue("ui/geometry", self.saveGeometry())
+        super().closeEvent(event)
 
     # ---------- visual polish ----------
     def _add_card_shadow(self, widget: QWidget, blur: int = 28, alpha: int = 150):
@@ -869,16 +1037,34 @@ class MainWindow(QMainWindow):
         self.endpoint_label.setText(self.t("endpoint"))
         self.local_btn.setText(self.t("local"))
         self.api_key_label.setText(self.t("api_key_label"))
+        self.api_key_edit.setPlaceholderText(self.t("api_key_placeholder"))
         self.argos_hint_label.setText(self.t("argos_hint"))
 
         self.src_label.setText(self.t("src_lang"))
         self.tgt_label.setText(self.t("tgt_lang"))
+        self.swap_langs_btn.setToolTip(self.t("swap_langs"))
 
         self.analyze_btn.setText(self.t("analyze"))
         self.translate_btn.setText(self.t("translate"))
         self.restore_btn.setText(self.t("restore"))
         self.view_changes_btn.setText(self.t("view_changes"))
         self.apply_btn.setText(self.t("apply_to_original"))
+        self.apply_btn.setToolTip(self.t("apply_not_packaged"))
+
+        self.game_tree.setHeaderLabels([
+            self.t("col_path"),
+            self.t("col_status"),
+            self.t("col_dialogues"),
+        ])
+        self.tree_empty_label.setText(self.t("tree_empty_hint"))
+        if self.game_dir is not None:
+            if self._analysis_ran:
+                self._update_tree_status_after_analysis(self._file_dialogue_counts)
+            else:
+                self._update_tree_status_before_analysis()
+
+        if not self._busy:
+            self._reset_batch_progress()
 
         self.menu_home.setTitle(self.t("menu_home"))
         self.menu_project.setTitle(self.t("menu_project"))
@@ -1048,6 +1234,7 @@ class MainWindow(QMainWindow):
         self.api_key_edit.setEnabled(not busy)
         self.src_combo.setEnabled(not busy)
         self.tgt_combo.setEnabled(not busy)
+        self.swap_langs_btn.setEnabled(not busy)
         self.game_tree.setEnabled(not busy)
 
         if busy:
@@ -1088,17 +1275,19 @@ class MainWindow(QMainWindow):
     def _on_batch_started(self, current_batch: int, total_batches: int):
         self.batch_progress.setRange(0, 0)
         self.batch_progress.setValue(0)
-        self.batch_progress.setFormat(f"Batch {current_batch}/{total_batches}: translating…")
+        self.batch_progress.setFormat(
+            self.t("batch_running").format(current=current_batch, total=total_batches))
 
     def _on_batch_finished(self, current_batch: int, total_batches: int):
         self.batch_progress.setRange(0, 1)
         self.batch_progress.setValue(1)
-        self.batch_progress.setFormat(f"Batch {current_batch}/{total_batches}: done")
+        self.batch_progress.setFormat(
+            self.t("batch_done").format(current=current_batch, total=total_batches))
 
     def _reset_batch_progress(self):
         self.batch_progress.setRange(0, 1)
         self.batch_progress.setValue(0)
-        self.batch_progress.setFormat("Batch: idle")
+        self.batch_progress.setFormat(self.t("batch_idle"))
 
     # =========================================================
     # LEFT PANEL: tree + analysis statuses
@@ -1115,13 +1304,12 @@ class MainWindow(QMainWindow):
         assert self.game_dir is not None
         return str(p.relative_to(self.game_dir)).replace("\\", "/")
 
-    def _set_item_status(self, item: QTreeWidgetItem, status_text: str, icon: QIcon | None, count: int | None):
+    def _set_item_status(self, item: QTreeWidgetItem, status_text: str, count: int | None):
         # column 1 = Status, column 2 = Dialogues
+        # The status text already carries its emoji marker - adding a QIcon on
+        # top of it produced a confusing double icon, so the column is text-only.
         item.setText(1, status_text)
-        if icon is not None:
-            item.setIcon(1, icon)
-        else:
-            item.setIcon(1, QIcon())
+        item.setTextAlignment(2, Qt.AlignRight | Qt.AlignVCenter)
 
         if count is None:
             item.setText(2, "")
@@ -1135,7 +1323,9 @@ class MainWindow(QMainWindow):
         self._analysis_ran = False
         self._file_dialogue_counts = {}
 
-        if not self.game_dir or not self.game_dir.exists():
+        has_project = bool(self.game_dir and self.game_dir.exists())
+        self.left_stack.setCurrentIndex(1 if has_project else 0)
+        if not has_project:
             return
 
         root_item = QTreeWidgetItem([self.game_dir.name, "", ""])
@@ -1179,42 +1369,32 @@ class MainWindow(QMainWindow):
         if not self.game_dir:
             return
 
-        # icons
-        ico_pending = self._std_icon(QStyle.SP_BrowserReload)      # 🕒
-        ico_na = self._std_icon(QStyle.SP_DialogResetButton)       # ⏺
-        ico_block = self._std_icon(QStyle.SP_MessageBoxCritical)   # ⛔
-
         for rel, item in self._tree_item_by_rel.items():
             rp = rel.lower()
 
             if rp.endswith(".rpy") or rp.endswith(".rpym"):
-                self._set_item_status(item, "🕒 Not analyzed", ico_pending, None)
+                self._set_item_status(item, self.t("st_pending"), None)
             elif rp.endswith(".rpa") or rp.endswith(".rpyc") or rp.endswith(".rpyb") or rp.endswith(".rpymc"):
-                self._set_item_status(item, "⛔ Not analyzable", ico_block, None)
+                self._set_item_status(item, self.t("st_blocked"), None)
             else:
-                self._set_item_status(item, "⏺ N/A", ico_na, None)
+                self._set_item_status(item, self.t("st_na"), None)
 
     def _update_tree_status_after_analysis(self, counts: dict[str, int]):
         """After analyze: scripts get analyzed/useless + count; packaged compiled/archives stay blocked."""
-        ico_ok = self._std_icon(QStyle.SP_DialogApplyButton)       # ✅
-        ico_useless = self._std_icon(QStyle.SP_DialogDiscardButton)  # ➖
-        ico_block = self._std_icon(QStyle.SP_MessageBoxCritical)   # ⛔
-        ico_na = self._std_icon(QStyle.SP_DialogResetButton)       # ⏺
-
         for rel, item in self._tree_item_by_rel.items():
             rp = rel.lower()
 
             if rp.endswith(".rpy") or rp.endswith(".rpym"):
                 c = int(counts.get(rel, 0))
                 if c > 0:
-                    self._set_item_status(item, "✅ Analyzed", ico_ok, c)
+                    self._set_item_status(item, self.t("st_ok"), c)
                 else:
-                    # analyzed, but no translatable strings found => "useless to analyze"
-                    self._set_item_status(item, "➖ Useless (0)", ico_useless, 0)
+                    # analyzed, but no translatable strings found => nothing to translate
+                    self._set_item_status(item, self.t("st_useless"), 0)
             elif rp.endswith(".rpa") or rp.endswith(".rpyc") or rp.endswith(".rpyb") or rp.endswith(".rpymc"):
-                self._set_item_status(item, "⛔ Not analyzable", ico_block, None)
+                self._set_item_status(item, self.t("st_blocked"), None)
             else:
-                self._set_item_status(item, "⏺ N/A", ico_na, None)
+                self._set_item_status(item, self.t("st_na"), None)
 
     def _on_tree_selection_changed(self):
         """Optional: show selected file path in the status bar / logs (no heavy actions)."""
@@ -1262,10 +1442,18 @@ class MainWindow(QMainWindow):
     def open_logs_folder(self):
         log_file = get_log_file()
         get_logger().info("Opening logs folder from menu.")
-        try:
-            os.startfile(log_file.parent)  # noqa: S606 (Windows-only app)
-        except Exception as e:
-            QMessageBox.critical(self, self.t("error"), str(e))
+        # QDesktopServices works on Windows, macOS and Linux alike
+        # (os.startfile only exists on Windows and crashed elsewhere).
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_file.parent))):
+            QMessageBox.critical(
+                self, self.t("error"),
+                f"{self.t('open_logs_error')}:\n{log_file.parent}"
+            )
+
+    def swap_languages(self):
+        src_idx = self.src_combo.currentIndex()
+        self.src_combo.setCurrentIndex(self.tgt_combo.currentIndex())
+        self.tgt_combo.setCurrentIndex(src_idx)
 
     def use_public_endpoint(self):
         self.endpoint_edit.setText(self.custom_endpoint or DEFAULT_PUBLIC_ENDPOINT)
@@ -1461,11 +1649,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(self.t("translation_finished"))
         self._refresh_actions_enabled()
 
+        lang = self.tgt_combo.currentData() or "?"
         QMessageBox.information(
             self,
             self.t("translation_finished"),
-            f"Modified files: {modified_files}\nNew backups created: {backups_created}\n\n"
-            f"{self.t('restore')}"
+            self.t("translation_done_msg").format(lang=lang, backups=backups_created),
         )
 
     def on_translation_error(self, msg: str):
@@ -1540,7 +1728,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             self.t("restore"),
-            "This will restore every .rpy file from its .bak backup.\n\nContinue?",
+            self.t("restore_confirm"),
             QMessageBox.Yes | QMessageBox.No
         )
         if answer != QMessageBox.Yes:
@@ -1565,7 +1753,7 @@ class MainWindow(QMainWindow):
         if not self._is_docker_installed():
             self._warn_docker_missing()
 
-        dlg = LocalTranslateDialog(self)
+        dlg = LocalTranslateDialog(self.t, self)
         if dlg.exec():
             self.endpoint_edit.setText(LOCAL_ENDPOINT)
             self._save_endpoint_mode("local")

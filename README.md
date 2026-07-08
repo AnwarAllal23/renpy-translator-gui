@@ -88,6 +88,15 @@ pyinstaller RenPyTranslator.spec
 
 The result is written to `dist/RenPyTranslator.exe`.
 
+To build the macOS app bundle instead:
+
+```bash
+pip install pyinstaller
+pyinstaller RenPyTranslator-macos.spec
+```
+
+The result is written to `dist/RenPy Translator.app` (ad-hoc signed, ready to run on the machine that built it).
+
 ## How to use it
 
 ### A. Source project (`.rpy` files are visible)

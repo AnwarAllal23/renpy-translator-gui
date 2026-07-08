@@ -131,6 +131,7 @@ UI_TEXTS = {
 
         # Misc
         "restore_done": "Restore done.",
+        "restore_confirm": "This will restore every .rpy file from its .bak backup.\n\nContinue?",
 
         "apply_to_original": "Apply to original game",
         "apply_title": "Apply translation",
@@ -143,6 +144,57 @@ UI_TEXTS = {
 
         "act_open_logs": "Open logs folder…",
         "log_file_hint": "Full log",
+        "open_logs_error": "Could not open the logs folder",
+
+        # Left panel (game tree)
+        "col_path": "Path",
+        "col_status": "Status",
+        "col_dialogues": "Dialogues",
+        "st_pending": "🕒 Not analyzed",
+        "st_ok": "✅ Analyzed",
+        "st_useless": "➖ No text",
+        "st_blocked": "⛔ Not analyzable",
+        "st_na": "⏺ N/A",
+        "tree_empty_hint": "No project loaded yet.\n\nClick “Choose game” and select your\nRen'Py project folder to get started.",
+
+        # Language row
+        "swap_langs": "Swap source and target languages",
+
+        # Progress
+        "batch_idle": "Batch: idle",
+        "batch_running": "Batch {current}/{total}: translating…",
+        "batch_done": "Batch {current}/{total}: done",
+
+        # Translation finished dialog
+        "translation_done_msg": (
+            "Translation written to game/tl/{lang}/.\n"
+            "New backups created: {backups}.\n\n"
+            "You can restore the original scripts anytime:\n"
+            "Tools → Restore originals (from backup)."
+        ),
+
+        "api_key_placeholder": "Paste your API key",
+
+        # Local translation dialog
+        "local_title": "Local translation (advanced)",
+        "local_intro_html": (
+            "<b>Local translation mode (LibreTranslate)</b><br><br>"
+            "This mode uses a <b>local</b> translation server (on your PC).<br>"
+            "✅ No limits<br>"
+            "✅ Often faster<br>"
+            "❌ Requires Docker Desktop<br><br>"
+            "<b>Languages supported by this app:</b><br>{languages}<br><br>"
+            "<b>IMPORTANT:</b> every language you use must be loaded in LibreTranslate.<br><br>"
+            "<b>Recommended Docker command (copy/paste):</b>"
+        ),
+        "local_status_untested": "🔎 Status: not tested",
+        "local_status_ok": "✅ Local server OK",
+        "local_status_fail": (
+            "❌ Local server not reachable.\n"
+            "Make sure Docker Desktop is running and you executed the command above."
+        ),
+        "local_test": "Test connection",
+        "local_use": "Use localhost",
 
         "act_tutorial": "How to translate a Ren'Py game…",
         "tutorial_title": "Ren'Py translation tutorial",
@@ -276,6 +328,7 @@ UI_TEXTS = {
         "cancel": "Annuler",
 
         "restore_done": "Restauration terminée.",
+        "restore_confirm": "Ça va restaurer chaque fichier .rpy depuis son backup .bak.\n\nContinuer ?",
 
         "apply_to_original": "Appliquer au jeu original",
         "apply_title": "Appliquer la traduction",
@@ -288,6 +341,57 @@ UI_TEXTS = {
 
         "act_open_logs": "Ouvrir le dossier des logs…",
         "log_file_hint": "Journal complet",
+        "open_logs_error": "Impossible d'ouvrir le dossier des logs",
+
+        # Panneau gauche (arbre du jeu)
+        "col_path": "Fichier",
+        "col_status": "Statut",
+        "col_dialogues": "Dialogues",
+        "st_pending": "🕒 Pas encore analysé",
+        "st_ok": "✅ Analysé",
+        "st_useless": "➖ Aucun texte",
+        "st_blocked": "⛔ Non analysable",
+        "st_na": "⏺ N/A",
+        "tree_empty_hint": "Aucun projet chargé.\n\nClique sur « Choisir un jeu » et sélectionne\nle dossier de ton projet Ren'Py.",
+
+        # Ligne des langues
+        "swap_langs": "Inverser les langues source et cible",
+
+        # Progression
+        "batch_idle": "Lot : en attente",
+        "batch_running": "Lot {current}/{total} : traduction…",
+        "batch_done": "Lot {current}/{total} : terminé",
+
+        # Fin de traduction
+        "translation_done_msg": (
+            "Traduction écrite dans game/tl/{lang}/.\n"
+            "Nouveaux backups créés : {backups}.\n\n"
+            "Tu peux restaurer les scripts originaux à tout moment :\n"
+            "Outils → Restaurer depuis backup."
+        ),
+
+        "api_key_placeholder": "Colle ta clé API",
+
+        # Dialogue de traduction locale
+        "local_title": "Traduction locale (avancé)",
+        "local_intro_html": (
+            "<b>Mode traduction locale (LibreTranslate)</b><br><br>"
+            "Ce mode utilise un serveur de traduction <b>local</b> (sur ton PC).<br>"
+            "✅ Aucune limite<br>"
+            "✅ Souvent plus rapide<br>"
+            "❌ Nécessite Docker Desktop<br><br>"
+            "<b>Langues prises en charge par l'app :</b><br>{languages}<br><br>"
+            "<b>IMPORTANT :</b> chaque langue utilisée doit être chargée dans LibreTranslate.<br><br>"
+            "<b>Commande Docker recommandée (copier/coller) :</b>"
+        ),
+        "local_status_untested": "🔎 Statut : non testé",
+        "local_status_ok": "✅ Serveur local OK",
+        "local_status_fail": (
+            "❌ Serveur local injoignable.\n"
+            "Vérifie que Docker Desktop tourne et que la commande ci-dessus a bien été lancée."
+        ),
+        "local_test": "Tester la connexion",
+        "local_use": "Utiliser localhost",
 
         "act_tutorial": "Tutoriel : traduire un jeu Ren'Py…",
         "tutorial_title": "Tutoriel de traduction Ren'Py",

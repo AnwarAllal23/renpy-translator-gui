@@ -1,6 +1,13 @@
 # app/theme.py
 from __future__ import annotations
 
+from pathlib import Path
+
+# QSS url() needs a real file path; assets live next to this module so the
+# theme keeps working from source checkouts and from the packaged app alike.
+_ASSETS = (Path(__file__).resolve().parent / "assets").as_posix()
+
+
 def qss_dark() -> str:
     """Dark theme QSS - deep indigo canvas, glass cards, blue -> violet -> pink accents."""
     bg = "#0a0e1a"
@@ -30,6 +37,23 @@ def qss_dark() -> str:
 
     QMainWindow, QWidget {{
         background: {bg};
+    }}
+
+    /* Labels must not paint their own background box over the cards -
+       widgets with a deliberate background (LogoChip, ProBadge, StatusPill)
+       override this via their objectName rules. */
+    QLabel {{
+        background: transparent;
+    }}
+
+    /* Same for plain containers living inside cards: the stacked pages
+       (endpoint row / API key row) and the stacks themselves must let the
+       card background show through instead of painting a darker band. */
+    QStackedWidget {{
+        background: transparent;
+    }}
+    QWidget#EnginePage {{
+        background: transparent;
     }}
 
     QToolTip {{
@@ -161,6 +185,37 @@ def qss_dark() -> str:
         font-weight: 700;
         font-size: 10px;
         letter-spacing: 1px;
+    }}
+
+    QLabel#EmptyState {{
+        color: {text_muted};
+        font-size: 13px;
+        font-weight: 600;
+        background: transparent;
+        border: none;
+        padding: 24px;
+    }}
+
+    QToolButton#SwapLang {{
+        background: {bg_lighter};
+        border: 1px solid {border};
+        border-radius: 10px;
+        padding: 5px 12px;
+        font-size: 15px;
+        font-weight: 700;
+        color: {primary};
+    }}
+    QToolButton#SwapLang:hover {{
+        background: {bg_hover};
+        border-color: {primary};
+    }}
+    QToolButton#SwapLang:pressed {{
+        border-color: {accent};
+        color: {accent};
+    }}
+    QToolButton#SwapLang:disabled {{
+        color: {text_muted};
+        border-color: {border_soft};
     }}
 
     /* -------- Status pill -------- */
@@ -309,9 +364,18 @@ def qss_dark() -> str:
     }}
 
     /* -------- Combo box popup -------- */
+    QComboBox:hover {{
+        border-color: rgba(99, 102, 241, 0.55);
+    }}
     QComboBox::drop-down {{
         border: 0px;
-        width: 26px;
+        width: 28px;
+    }}
+    QComboBox::down-arrow {{
+        image: url("{_ASSETS}/chevron_down.svg");
+        width: 12px;
+        height: 12px;
+        margin-right: 10px;
     }}
     QComboBox QAbstractItemView {{
         background: {bg_lighter};
@@ -370,6 +434,14 @@ def qss_dark() -> str:
         background: {bg_soft};
         border-top: 1px solid {border_soft};
     }}
+    QStatusBar::item {{
+        border: none;
+    }}
+    QSizeGrip {{
+        background: transparent;
+        width: 14px;
+        height: 14px;
+    }}
 
     /* -------- Progress -------- */
     QProgressBar {{
@@ -385,7 +457,7 @@ def qss_dark() -> str:
     QProgressBar::chunk {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
             stop:0 {primary}, stop:0.6 {primary2}, stop:1 {accent});
-        border-radius: 9px;
+        border-radius: 8px;
     }}
 
     /* -------- Dialogs -------- */
@@ -395,6 +467,10 @@ def qss_dark() -> str:
 
     QMessageBox {{
         background: {bg_light};
+    }}
+    QMessageBox QPushButton {{
+        padding: 8px 18px;
+        min-width: 72px;
     }}
 
     /* -------- Log console -------- */
